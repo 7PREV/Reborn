@@ -144,11 +144,8 @@ export default function ClanDetailPage() {
         try {
           const r = await api.get(`/clans/${id}/requests`);
           setRequests(r.data);
-        } catch (err) {
-          if (err?.response?.status !== 403) {
-            // eslint-disable-next-line no-console
-            console.error("requests fetch failed:", err);
-          }
+        } catch {
+          // 403 means not staff anymore; benign
         }
       }
     } catch (err) {

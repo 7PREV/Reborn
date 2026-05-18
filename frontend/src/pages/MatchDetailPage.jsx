@@ -124,11 +124,8 @@ export default function MatchDetailPage() {
     try {
       const { data } = await api.get(`/matches/${id}`);
       setMatch(data);
-    } catch (err) {
-      if (process.env.NODE_ENV !== "production") {
-        // eslint-disable-next-line no-console
-        console.error("loadMatch failed:", err);
-      }
+    } catch {
+      // polling will retry
     }
   }, [id]);
 
@@ -139,12 +136,8 @@ export default function MatchDetailPage() {
       setCanWrite(data.can_write);
       setIsAdminFlag(data.is_admin);
       setUserClanInChat(data.user_clan_id);
-    } catch (err) {
-      const code = err?.response?.status;
-      if (process.env.NODE_ENV !== "production" && code && ![401, 403].includes(code)) {
-        // eslint-disable-next-line no-console
-        console.error("loadChat failed:", err);
-      }
+    } catch {
+      // 401/403 expected for guests / outsiders; polling retries
     }
   }, [id]);
 

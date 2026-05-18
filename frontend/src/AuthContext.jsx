@@ -11,11 +11,7 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.get("/auth/me");
       setUser(data);
-    } catch (err) {
-      // 401 here means user is simply not logged in; not an actual error
-      if (err?.response?.status && err.response.status !== 401) {
-        console.error("auth/me failed:", err);
-      }
+    } catch {
       setUser(false);
     } finally {
       setLoading(false);
@@ -41,8 +37,8 @@ export function AuthProvider({ children }) {
   const logout = useCallback(async () => {
     try {
       await api.post("/auth/logout");
-    } catch (err) {
-      console.error("logout failed:", err);
+    } catch {
+      // ignore — clearing local state is the goal
     }
     setUser(false);
   }, []);

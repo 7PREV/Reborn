@@ -219,7 +219,7 @@ class RuleIn(BaseModel):
 
 # ---------------- Startup ----------------
 @app.on_event("startup")
-async def startup():
+async def startup() -> None:
     await db.users.create_index("email", unique=True)
     await db.users.create_index("username")
     await db.clans.create_index("name", unique=True)
@@ -284,7 +284,7 @@ async def startup():
 
 
 @app.on_event("shutdown")
-async def shutdown():
+async def shutdown() -> None:
     client.close()
 
 
@@ -696,6 +696,30 @@ async def get_match(match_id: str):
     return await _enrich_match(m)
 
 
+def _resolve_vote_side(user: dict, staff_a: list, staff_b: list) -> str:
+    """Determine which side ('vote_a'/'vote_b') the current user votes on."""
+    if user["id"] in staff_a:
+        return "vote_a"
+    if user["id"] in staff_b:
+        return "vote_b"
+    if user.get("role") == "admin":
+        raise HTTPException(400, "المنظم يستخدم admin-resolve-map")
+    raise HTTPException(403, "ليس لديك صلاحية")
+
+
+def _apply_map_vote(mp: dict, side: str, winner_label: str) -> dict:
+    """Apply a vote on a single map; reconcile agreement/dispute. Returns updated mp."""
+    mp[side] = winner_label
+    if mp.get("vote_a") and mp.get("vote_b"):
+        if mp["vote_a"] == mp["vote_b"]:
+            mp["winner"] = mp["vote_a"]
+            mp["disputed"] = False
+        else:
+            mp["disputed"] = True
+            mp["winner"] = None
+    return mp
+
+
 @api.post("/matches/{match_id}/vote-map")
 async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_current_user)):
     match = await db.matches.find_one({"id": match_id}, {"_id": 0})
@@ -705,33 +729,18 @@ async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_curr
         raise HTTPException(400, "المباراة منتهية")
     if not (0 <= body.map_index < BO_TOTAL):
         raise HTTPException(400, "رقم ماب غير صحيح")
+    if body.winner_clan_id not in (match["clan_a_id"], match["clan_b_id"]):
+        raise HTTPException(400, "كلان غير صحيح")
     a = await _get_clan(match["clan_a_id"])
     b = await _get_clan(match["clan_b_id"])
     staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
     staff_b = [b["leader_id"]] + b.get("vice_leader_ids", [])
-    is_admin = user.get("role") == "admin"
-    if user["id"] in staff_a:
-        side = "vote_a"
-    elif user["id"] in staff_b:
-        side = "vote_b"
-    elif is_admin:
-        raise HTTPException(400, "المنظم يستخدم admin-resolve-map")
-    else:
-        raise HTTPException(403, "ليس لديك صلاحية")
-    if body.winner_clan_id not in (match["clan_a_id"], match["clan_b_id"]):
-        raise HTTPException(400, "كلان غير صحيح")
+    side = _resolve_vote_side(user, staff_a, staff_b)
     mp = match["maps"][body.map_index]
     if mp.get("admin_resolved"):
         raise HTTPException(400, "هذا الماب أنهاه المنظم")
-    mp[side] = "A" if body.winner_clan_id == match["clan_a_id"] else "B"
-    if mp.get("vote_a") and mp.get("vote_b"):
-        if mp["vote_a"] == mp["vote_b"]:
-            mp["winner"] = mp["vote_a"]
-            mp["disputed"] = False
-        else:
-            mp["disputed"] = True
-            mp["winner"] = None
-    match["maps"][body.map_index] = mp
+    winner_label = "A" if body.winner_clan_id == match["clan_a_id"] else "B"
+    match["maps"][body.map_index] = _apply_map_vote(mp, side, winner_label)
     await db.matches.update_one({"id": match_id}, {"$set": {"maps": match["maps"]}})
     await _maybe_finish(match)
     fresh = await db.matches.find_one({"id": match_id}, {"_id": 0})
@@ -829,45 +838,56 @@ async def get_chat(match_id: str, user: dict = Depends(get_current_user)):
     }
 
 
+def _classify_message_type(body: ChatMessageIn) -> str:
+    if body.video:
+        return "video"
+    if body.image:
+        return "image"
+    return "text"
+
+
+def _determine_chat_role(user: dict, a: dict, b: dict) -> str:
+    if user.get("role") == "admin":
+        return "admin"
+    if user["id"] == a["leader_id"] or user["id"] == b["leader_id"]:
+        return "leader"
+    return "vice"
+
+
+def _build_chat_message(body: ChatMessageIn, user: dict, match_id: str, role: str) -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": user["id"],
+        "username": user["username"],
+        "user_role": role,
+        "user_clan_id": user.get("clan_id"),
+        "type": _classify_message_type(body),
+        "text": body.text or "",
+        "image": body.image,
+        "video": body.video,
+        "opponent_decision": None,
+        "admin_decision": None,
+        "admin_note": "",
+        "created_at": iso(now_utc()),
+    }
+
+
 @api.post("/matches/{match_id}/chat")
 async def post_chat(match_id: str, body: ChatMessageIn, user: dict = Depends(get_current_user)):
     m = await db.matches.find_one({"id": match_id}, {"_id": 0})
     if not m:
         raise HTTPException(404, "غير موجود")
-    is_admin = user.get("role") == "admin"
+    if not body.text and not body.image and not body.video:
+        raise HTTPException(400, "الرسالة فارغة")
     a = await db.clans.find_one({"id": m["clan_a_id"]})
     b = await db.clans.find_one({"id": m["clan_b_id"]})
     staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
     staff_b = [b["leader_id"]] + b.get("vice_leader_ids", [])
+    is_admin = user.get("role") == "admin"
     if not (is_admin or user["id"] in staff_a or user["id"] in staff_b):
         raise HTTPException(403, "لا يمكنك الكتابة في هذا الشات")
-    if not body.text and not body.image and not body.video:
-        raise HTTPException(400, "الرسالة فارغة")
-
-    if is_admin:
-        role_in_chat = "admin"
-    elif user["id"] == a["leader_id"] or user["id"] == b["leader_id"]:
-        role_in_chat = "leader"
-    else:
-        role_in_chat = "vice"
-
-    msg_type = "video" if body.video else ("image" if body.image else "text")
-    msg = {
-        "id": str(uuid.uuid4()),
-        "match_id": match_id,
-        "user_id": user["id"],
-        "username": user["username"],
-        "user_role": role_in_chat,
-        "user_clan_id": user.get("clan_id"),
-        "type": msg_type,
-        "text": body.text or "",
-        "image": body.image,
-        "video": body.video,
-        "opponent_decision": None,   # for image: opposing clan leader approval
-        "admin_decision": None,      # for video: admin moderation
-        "admin_note": "",
-        "created_at": iso(now_utc()),
-    }
+    msg = _build_chat_message(body, user, match_id, _determine_chat_role(user, a, b))
     await db.chat_messages.insert_one(msg)
     msg.pop("_id", None)
     return msg
