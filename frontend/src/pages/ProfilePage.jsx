@@ -17,8 +17,12 @@ export default function ProfilePage() {
 
   const respond = async (inv, action) => {
     try {
-      await api.post(`/invites/${inv.id}`, { action });
-      toast.success(action === "accept" ? "انضممت للكلان" : "رفضت الدعوة");
+      const { data } = await api.post(`/invites/${inv.id}`, { action });
+      if (data?.reward_granted) {
+        toast.success("🎁 امتلأ كلانك! حصلت على Plus 7 أيام!", { duration: 6000 });
+      } else {
+        toast.success(action === "accept" ? "انضممت للكلان" : "رفضت الدعوة");
+      }
       await refresh();
       load();
     } catch (err) {
@@ -66,10 +70,16 @@ export default function ProfilePage() {
           <h2 className="font-display font-black text-xl">RIVALS Plus</h2>
           {user.is_plus && <span className="text-[10px] uppercase tracking-widest bg-gold-500 text-black px-2 py-0.5 rounded">مفعل</span>}
         </div>
+        {user.plus_expires_at && (
+          <div className="text-xs text-gold-500 mb-3" data-testid="plus-expiry">
+            ينتهي خلال: {Math.max(0, Math.ceil((new Date(user.plus_expires_at) - new Date()) / 86400000))} يوم
+          </div>
+        )}
         <ul className="text-sm text-white/70 space-y-1 mb-4 list-disc pr-5">
           <li>زيادة سعة الكلان من 7 إلى 12 لاعب</li>
           <li>تعيين نائبَين للقائد بدل نائب واحد</li>
           <li>دعم أولوية في النزاعات</li>
+          <li className="text-gold-500">🎁 املأ كلانك بـ 6 لاعبين تحصل على Plus مجاناً لمدة 7 أيام</li>
         </ul>
         <button data-testid="toggle-plus-btn" onClick={togglePlus} className={`px-4 py-2 rounded-md font-bold ${
           user.is_plus ? "bg-white/5 hover:bg-white/10" : "bg-gold-500 text-black hover:bg-gold-400"

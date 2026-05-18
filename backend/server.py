@@ -68,6 +68,19 @@ def make_token(user_id: str, email: str, role: str) -> str:
     }, JWT_SECRET, algorithm=JWT_ALG)
 
 
+def user_is_plus(u: dict) -> bool:
+    """Effective Plus: manual flag OR temporary expiry not yet passed."""
+    if u.get("is_plus"):
+        return True
+    exp = u.get("plus_expires_at")
+    if not exp:
+        return False
+    try:
+        return datetime.fromisoformat(exp) > now_utc()
+    except Exception:
+        return False
+
+
 def sanitize_user(u: dict) -> dict:
     return {
         "id": u["id"],
@@ -77,9 +90,40 @@ def sanitize_user(u: dict) -> dict:
         "clan_id": u.get("clan_id"),
         "points": u.get("points", 0),
         "avatar": u.get("avatar"),
-        "is_plus": u.get("is_plus", False),
+        "is_plus": user_is_plus(u),
+        "plus_expires_at": u.get("plus_expires_at"),
         "created_at": u.get("created_at"),
     }
+
+
+async def _maybe_grant_full_clan_reward(clan_id: str) -> bool:
+    """When a clan first reaches 7 members, grant the leader 7-day Plus.
+    Returns True if reward was just granted."""
+    clan = await db.clans.find_one({"id": clan_id})
+    if not clan:
+        return False
+    if clan.get("founder_reward_given"):
+        return False
+    if len(clan.get("member_ids", [])) < CLAN_LIMIT_DEFAULT:
+        return False
+    leader = await db.users.find_one({"id": clan["leader_id"]})
+    if not leader:
+        return False
+    # Only grant if leader is not already on permanent Plus
+    if not leader.get("is_plus"):
+        new_expiry = now_utc() + timedelta(days=7)
+        existing_exp = leader.get("plus_expires_at")
+        # Extend if already has a future expiry
+        if existing_exp:
+            try:
+                cur = datetime.fromisoformat(existing_exp)
+                if cur > new_expiry:
+                    new_expiry = cur + timedelta(days=7)
+            except Exception:
+                pass
+        await db.users.update_one({"id": leader["id"]}, {"$set": {"plus_expires_at": iso(new_expiry)}})
+    await db.clans.update_one({"id": clan_id}, {"$set": {"founder_reward_given": True}})
+    return True
 
 
 async def get_current_user(request: Request) -> dict:
@@ -337,7 +381,7 @@ def _is_clan_staff(clan: dict, user: dict) -> bool:
 
 async def _leader_limits(clan: dict) -> tuple[int, int]:
     leader = await db.users.find_one({"id": clan["leader_id"]})
-    plus = bool(leader and leader.get("is_plus"))
+    plus = bool(leader and user_is_plus(leader))
     return (CLAN_LIMIT_PLUS if plus else CLAN_LIMIT_DEFAULT,
             VICE_LIMIT_PLUS if plus else VICE_LIMIT_DEFAULT)
 
@@ -452,8 +496,9 @@ async def handle_request(clan_id: str, req_id: str, body: HandleRequestIn, user:
         if target and not target.get("clan_id"):
             await db.users.update_one({"id": req["user_id"]}, {"$set": {"clan_id": clan_id}})
             await db.clans.update_one({"id": clan_id}, {"$addToSet": {"member_ids": req["user_id"]}})
+            granted = await _maybe_grant_full_clan_reward(clan_id)
     await db.join_requests.update_one({"id": req_id}, {"$set": {"status": body.action}})
-    return {"ok": True}
+    return {"ok": True, "reward_granted": bool(locals().get("granted"))}
 
 
 @api.post("/clans/{clan_id}/invite")
@@ -508,8 +553,9 @@ async def respond_invite(inv_id: str, body: HandleRequestIn, user: dict = Depend
             raise HTTPException(400, "الكلان ممتلئ")
         await db.users.update_one({"id": user["id"]}, {"$set": {"clan_id": inv["clan_id"]}})
         await db.clans.update_one({"id": inv["clan_id"]}, {"$addToSet": {"member_ids": user["id"]}})
+        granted = await _maybe_grant_full_clan_reward(inv["clan_id"])
     await db.join_requests.update_one({"id": inv_id}, {"$set": {"status": body.action}})
-    return {"ok": True}
+    return {"ok": True, "reward_granted": bool(locals().get("granted"))}
 
 
 @api.post("/clans/{clan_id}/kick/{member_id}")

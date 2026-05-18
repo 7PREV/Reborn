@@ -52,8 +52,13 @@ export default function ClanDetailPage() {
 
   const handleReq = async (rid, action) => {
     try {
-      await api.post(`/clans/${id}/requests/${rid}`, { action });
-      toast.success(action === "accept" ? "تم القبول" : "تم الرفض");
+      const { data } = await api.post(`/clans/${id}/requests/${rid}`, { action });
+      if (data?.reward_granted) {
+        toast.success("🎁 مبروك! كلانك امتلأ، حصلت على Plus مجاناً لمدة 7 أيام!", { duration: 6000 });
+        await refresh();
+      } else {
+        toast.success(action === "accept" ? "تم القبول" : "تم الرفض");
+      }
       load();
     } catch (err) {
       toast.error(formatApiErrorDetail(err.response?.data?.detail));
@@ -138,6 +143,12 @@ export default function ClanDetailPage() {
               {clan.member_ids?.length || 0} / {clan.max_members || 7} لاعب
               {clan.max_members === 12 && <span className="text-gold-500 mr-2 inline-flex items-center gap-1"><Sparkles size={10} /> Plus</span>}
             </div>
+            {!clan.founder_reward_given && (clan.member_ids?.length || 0) < 7 && (
+              <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded bg-gold-500/10 border border-gold-500/30 text-xs text-gold-500">
+                <Sparkles size={12} />
+                <span>اكمل {7 - (clan.member_ids?.length || 0)} لاعبين بعد لتحصل على Plus مجاناً 7 أيام!</span>
+              </div>
+            )}
           </div>
           <div className="flex gap-6 text-center">
             <div>
