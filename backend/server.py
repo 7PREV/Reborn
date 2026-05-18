@@ -657,6 +657,8 @@ async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_curr
         raise HTTPException(404, "غير موجود")
     if match["status"] != "live":
         raise HTTPException(400, "المباراة منتهية")
+    if not (0 <= body.map_index < BO_TOTAL):
+        raise HTTPException(400, "رقم ماب غير صحيح")
     a = await _get_clan(match["clan_a_id"])
     b = await _get_clan(match["clan_b_id"])
     staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
@@ -676,7 +678,6 @@ async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_curr
     if mp.get("admin_resolved"):
         raise HTTPException(400, "هذا الماب أنهاه المنظم")
     mp[side] = "A" if body.winner_clan_id == match["clan_a_id"] else "B"
-    # Check agreement
     if mp.get("vote_a") and mp.get("vote_b"):
         if mp["vote_a"] == mp["vote_b"]:
             mp["winner"] = mp["vote_a"]
@@ -687,7 +688,8 @@ async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_curr
     match["maps"][body.map_index] = mp
     await db.matches.update_one({"id": match_id}, {"$set": {"maps": match["maps"]}})
     await _maybe_finish(match)
-    return await _enrich_match(match)
+    fresh = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    return await _enrich_match(fresh)
 
 
 @api.post("/matches/{match_id}/admin-resolve-map")
@@ -699,6 +701,8 @@ async def admin_resolve_map(match_id: str, body: AdminResolveMapIn, user: dict =
         raise HTTPException(404, "غير موجود")
     if match["status"] != "live":
         raise HTTPException(400, "المباراة منتهية")
+    if not (0 <= body.map_index < BO_TOTAL):
+        raise HTTPException(400, "رقم ماب غير صحيح")
     if body.winner_clan_id not in (match["clan_a_id"], match["clan_b_id"]):
         raise HTTPException(400, "كلان غير صحيح")
     mp = match["maps"][body.map_index]
@@ -708,7 +712,8 @@ async def admin_resolve_map(match_id: str, body: AdminResolveMapIn, user: dict =
     match["maps"][body.map_index] = mp
     await db.matches.update_one({"id": match_id}, {"$set": {"maps": match["maps"]}})
     await _maybe_finish(match)
-    return await _enrich_match(match)
+    fresh = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    return await _enrich_match(fresh)
 
 
 @api.post("/matches/{match_id}/dispute")
