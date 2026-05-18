@@ -77,7 +77,7 @@ def test_register_and_me():
     r = s.get(f"{API}/auth/me", headers={"Authorization": f"Bearer {t}"})
     assert r.status_code == 200
     assert r.json()["id"] == u["id"]
-    assert r.json()["is_plus"] is False
+    assert r.json()["is_plus"] == False
 
 
 # ---- Plus toggle ----
@@ -86,10 +86,10 @@ def test_toggle_plus():
     h = {"Authorization": f"Bearer {t}"}
     r = s.post(f"{API}/me/plus", headers=h)
     assert r.status_code == 200
-    assert r.json()["is_plus"] is True
+    assert r.json()["is_plus"] == True
     # Toggle back
     r = s.post(f"{API}/me/plus", headers=h)
-    assert r.json()["is_plus"] is False
+    assert r.json()["is_plus"] == False
 
 
 # ---- Rules ----
@@ -227,8 +227,8 @@ def match(admin, leader_a, leader_b):
         assert mp["vote_a"] is None
         assert mp["vote_b"] is None
         assert mp["winner"] is None
-        assert mp["disputed"] is False
-        assert mp["admin_resolved"] is False
+        assert mp["disputed"] == False
+        assert mp["admin_resolved"] == False
     return d
 
 
@@ -257,7 +257,7 @@ def test_vote_map_agreement_and_finish(match, leader_a, leader_b):
                       json={"map_index": 1, "winner_clan_id": ca})
     r = requests.post(f"{API}/matches/{mid}/vote-map", headers=h_b,
                       json={"map_index": 1, "winner_clan_id": cb})
-    assert r.json()["maps"][1]["disputed"] is True
+    assert r.json()["maps"][1]["disputed"] == True
     assert r.json()["maps"][1]["winner"] is None
 
     # Map 2: both vote A -> A wins -> match should auto-finish (2 wins for A)
@@ -314,8 +314,8 @@ def test_admin_resolve_map(admin, leader_a, leader_b):
     assert r.status_code == 200
     mp = r.json()["maps"][0]
     assert mp["winner"] == "A"
-    assert mp["admin_resolved"] is True
-    assert mp["disputed"] is False
+    assert mp["admin_resolved"] == True
+    assert mp["disputed"] == False
 
 
 def test_dispute_endpoint(admin, leader_a, leader_b):
@@ -376,14 +376,14 @@ def test_chat_post_and_permissions(chat_match, leader_a, leader_b):
     r = requests.get(f"{API}/matches/{mid}/chat", headers=h_o)
     assert r.status_code == 200
     data = r.json()
-    assert data["can_write"] is False
+    assert data["can_write"] == False
     for m in data["messages"]:
         assert m.get("image") or m.get("video"), "Outsider should only see media"
         assert m.get("text") == "", "text must be stripped"
 
     # Player-in-match sees full content
     r = requests.get(f"{API}/matches/{mid}/chat", headers=h_a)
-    assert r.json()["can_write"] is True
+    assert r.json()["can_write"] == True
     full = r.json()["messages"]
     # text message present
     assert any(m["type"] == "text" and m["text"] == "hello A" for m in full)
