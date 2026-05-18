@@ -1,0 +1,86 @@
+{
+  "theme": "dark",
+  "archetype": "Archetype 5 (Jewel & Luxury) + Archetype 2 (Performance Pro)",
+  "rtl": true,
+  "colors": {
+    "background": "#0A0A0B",
+    "surface": "#121418",
+    "surface_hover": "#1A1D24",
+    "primary": "#D4AF37",
+    "primary_hover": "#FDE047",
+    "text_main": "#F8FAFC",
+    "text_muted": "#94A3B8",
+    "success": "#10B981",
+    "danger": "#F43F5E",
+    "border": "rgba(255, 255, 255, 0.05)",
+    "border_active": "rgba(212, 175, 55, 0.3)"
+  },
+  "typography": {
+    "headings": {
+      "font_family": "Cairo, sans-serif",
+      "weights": ["700", "900"],
+      "usage": "H1, H2, H3, widget titles, major CTAs"
+    },
+    "body": {
+      "font_family": "Tajawal, sans-serif",
+      "weights": ["400", "500"],
+      "usage": "paragraphs, labels, small text, input fields"
+    },
+    "scale": {
+      "h1": "text-4xl md:text-5xl lg:text-6xl tracking-tight",
+      "h2": "text-2xl md:text-3xl lg:text-4xl tracking-tight",
+      "h3": "text-xl md:text-2xl",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm uppercase tracking-[0.1em]"
+    }
+  },
+  "layout": {
+    "spacing": "Generous (p-6, p-8, p-12). Avoid cramped containers.",
+    "grids": "Control Room Grid for dashboards (grid-cols-1 md:grid-cols-3 lg:grid-cols-4, gap-6).",
+    "alignment": "RTL alignment natively. Use flex-row for horizontal stacks (browser handles RTL flip).",
+    "radius": "Subtle rounding (rounded-lg or rounded-xl). Avoid pill-shapes unless for small badges."
+  },
+  "components_instructions": {
+    "general": "DO NOT USE SHADCN CARDS for everything. Go for rectangular, flat surfaces with 1px border-white/5. Override shadcn default styles to match the dark luxury theme.",
+    "buttons": "Primary buttons: bg-[#D4AF37] text-black hover:bg-[#FDE047]. Secondary: bg-transparent border border-white/10 text-white hover:bg-white/5.",
+    "inputs": "bg-[#121418] border-white/10 text-white placeholder-white/30 focus:border-[#D4AF37] focus:ring-1 focus:ring-[#D4AF37].",
+    "tables": "Use for Leaderboards and Match History. Striped rows (transparent to white/5), hover states on rows. Text aligned to the start (Right for RTL).",
+    "chat": "Match Challenge Chat: Dedicated scrollable container. Distinguish admin/leader messages (maybe gold subtle border). Input area only visible to authorized roles (mock this state). Image upload button present.",
+    "modals": "Join Requests, Invites, Match creation. Glassmorphism overlay (backdrop-blur-xl bg-black/60) with solid #121418 modal body."
+  },
+  "features_mapping": {
+    "auth": "Email + Google Auth. Minimalist centered form on a dark abstract background.",
+    "clan_management": "Clan profile page. Roster list (Players, Vice-Leader, Leader). Kick/Invite buttons next to players (for leader). Pending join requests list.",
+    "match_challenge": "A view showing two competing clans (A vs B). Below it, the private chat interface. Status badge (Live, Upcoming, Finished).",
+    "live_matches": "Bento grid of currently active matches. Highlighting the game being played and current score.",
+    "leaderboard": "Ranked list of clans/players with their Elo/Points. Top 3 highlighted with Gold, Silver, Bronze accents.",
+    "history": "List of matches finished in the last 24 hours.",
+    "search": "Global search bar in header for Clans and Players. Returns a dropdown or dedicated search results page.",
+    "admin_panel": "Separate view/tab for organizers to manage matches, verify results, and monitor chats."
+  },
+  "images": {
+    "hero_background": "https://static.prod-images.emergentagent.com/jobs/6e794572-9280-4c42-a6f5-c2e716461871/images/d569d6be88a33830ebf0dfb9ba693e26bf0436a0cbb2a5057b07d2ab8b627063.png",
+    "stadium_hero": "https://static.prod-images.emergentagent.com/jobs/6e794572-9280-4c42-a6f5-c2e716461871/images/142994e1feb9d2aec8d9cc127fa5cab3debfae6c2920a6a272eb5fed5d813118.png",
+    "tournament_crowd": "https://images.unsplash.com/photo-1566304211221-a25fe7aacbe2?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDF8MHwxfHNlYXJjaHwyfHxlc3BvcnRzJTIwdG91cm5hbWVudCUyMHN0YWdlfGVufDB8fHx8MTc3OTEwOTc3MXww&ixlib=rb-4.1.0&q=85",
+    "dark_gamer_setup": "https://images.unsplash.com/photo-1675410202405-5ef270c857d3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzN8MHwxfHNlYXJjaHwyfHxnYW1lciUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3OTEwOTc3MXww&ixlib=rb-4.1.0&q=85",
+    "game_logos": {
+      "pubg": "Use text or iconoir-react icons for abstraction",
+      "fortnite": "Use text or iconoir-react icons for abstraction",
+      "valorant": "Use text or iconoir-react icons for abstraction",
+      "fifa": "Use text or iconoir-react icons for abstraction",
+      "csgo": "Use text or iconoir-react icons for abstraction"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Ensure the `<html dir='rtl'>` tag is set in `index.html` to enforce right-to-left layout globally.",
+    "Use standard Tailwind logical properties if needed, but flexbox naturally respects RTL when `dir='rtl'` is set.",
+    "Install and import Google Fonts: 'Cairo' and 'Tajawal'. Update tailwind.config.js to include them.",
+    "Construct the UI in dark mode only. Do not provide a light mode toggle.",
+    "Implement the Layout: Header (Nav, Search, Profile), Main Content (Bento Grid or Tabbed views for Dashboard).",
+    "Auth Page: Split screen. Left: Form. Right: 'stadium_hero' image with 'hero_background' overlay.",
+    "Mock data extensively to show all functionalities (Live matches, Clans, Chat messages, Leaderboard).",
+    "Chat Component: Implement a mock chat window. Add a text input and an image upload button (mocked functionality). Show distinction between Admin/Leader messages and regular player (view-only) messages.",
+    "Use Lucide-react for icons. Mirror directional icons (e.g., arrows) using 'transform scale-x-[-1]' if they don't auto-flip in RTL.",
+    "Include 'data-testid' on all interactive elements (buttons, inputs, links, tabs)."
+  ]
+}
