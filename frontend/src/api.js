@@ -8,12 +8,6 @@ const api = axios.create({
   withCredentials: true,
 });
 
-api.interceptors.request.use((cfg) => {
-  const tok = localStorage.getItem("token");
-  if (tok) cfg.headers.Authorization = `Bearer ${tok}`;
-  return cfg;
-});
-
 export default api;
 
 export function formatApiErrorDetail(detail) {

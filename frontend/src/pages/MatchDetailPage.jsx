@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
@@ -11,13 +11,14 @@ import { toast } from "sonner";
 function MapsBoard({ match, isLeaderA, isLeaderB, isAdmin, onVote, onResolve }) {
   return (
     <div className="grid sm:grid-cols-3 gap-3 mt-6">
-      {match.maps.map((mp, idx) => {
+      {match.maps.map((mp) => {
+        const idx = mp.index;
         const winnerSide = mp.winner;
         const aWin = winnerSide === "A";
         const bWin = winnerSide === "B";
         const myVote = isLeaderA ? mp.vote_a : isLeaderB ? mp.vote_b : null;
         return (
-          <div key={idx} data-testid={`map-${idx}`} className={`rounded-lg border p-4 ${
+          <div key={mp.index} data-testid={`map-${idx}`} className={`rounded-lg border p-4 ${
             mp.disputed ? "border-destructive/50 bg-destructive/5"
             : mp.winner ? "border-gold-500/30 bg-gold-500/5"
             : "border-white/5 bg-surface"
@@ -179,11 +180,16 @@ export default function MatchDetailPage() {
   const [video, setVideo] = useState(null);
   const scrollRef = useRef(null);
 
-  const loadMatch = async () => {
-    const { data } = await api.get(`/matches/${id}`);
-    setMatch(data);
-  };
-  const loadChat = async () => {
+  const loadMatch = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/matches/${id}`);
+      setMatch(data);
+    } catch (err) {
+      console.error("loadMatch failed:", err);
+    }
+  }, [id]);
+
+  const loadChat = useCallback(async () => {
     try {
       const { data } = await api.get(`/matches/${id}/chat`);
       setMessages(data.messages);
@@ -191,20 +197,28 @@ export default function MatchDetailPage() {
       setIsAdminFlag(data.is_admin);
       setUserClanInChat(data.user_clan_id);
     } catch (err) {
-      // silent
+      // 403 expected for non-members; only log unexpected errors
+      if (err?.response?.status && ![401, 403].includes(err.response.status)) {
+        console.error("loadChat failed:", err);
+      }
     }
-  };
+  }, [id]);
 
   useEffect(() => {
     loadMatch();
     loadChat();
     const t = setInterval(() => { loadChat(); loadMatch(); }, 4000);
     return () => clearInterval(t);
-  }, [id]);
+  }, [loadMatch, loadChat]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages.length]);
+
+  const matchClans = useMemo(
+    () => ({ a: match?.clan_a?.id, b: match?.clan_b?.id }),
+    [match?.clan_a?.id, match?.clan_b?.id]
+  );
 
   if (!match) return <div className="text-white/40">جارٍ التحميل...</div>;
 
@@ -383,7 +397,7 @@ export default function MatchDetailPage() {
               userClanId={userClanInChat}
               onOpponentDecide={opponentDecide}
               onAdminDecide={adminDecide}
-              matchClans={{ a: match.clan_a?.id, b: match.clan_b?.id }}
+              matchClans={matchClans}
             />
           ))}
         </div>

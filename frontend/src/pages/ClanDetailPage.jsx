@@ -24,7 +24,11 @@ export default function ClanDetailPage() {
       try {
         const r = await api.get(`/clans/${id}/requests`);
         setRequests(r.data);
-      } catch {/* ignore */}
+      } catch (err) {
+        if (err?.response?.status !== 403) {
+          console.error("load requests failed:", err);
+        }
+      }
     }
   };
 
