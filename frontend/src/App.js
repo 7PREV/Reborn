@@ -1,54 +1,61 @@
-import { useEffect } from "react";
-import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import axios from "axios";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider, useAuth } from "./AuthContext";
+import Layout from "./components/Layout";
+import AuthPage from "./pages/AuthPage";
+import HomePage from "./pages/HomePage";
+import ClansPage from "./pages/ClansPage";
+import ClanDetailPage from "./pages/ClanDetailPage";
+import MatchesPage from "./pages/MatchesPage";
+import MatchDetailPage from "./pages/MatchDetailPage";
+import PlayersPage from "./pages/PlayersPage";
+import LeaderboardPage from "./pages/LeaderboardPage";
+import ProfilePage from "./pages/ProfilePage";
+import AdminPage from "./pages/AdminPage";
+import RulesPage from "./pages/RulesPage";
+import { Toaster } from "sonner";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+function Protected({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="min-h-screen grid place-items-center text-white/40">...</div>;
+  if (!user) return <Navigate to="/auth" replace />;
+  return children;
+}
 
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
+function PublicShell({ children }) {
+  const { loading } = useAuth();
+  if (loading) return <div className="min-h-screen grid place-items-center text-white/40">...</div>;
+  return <Layout>{children}</Layout>;
+}
 
-  useEffect(() => {
-    helloWorldApi();
-  }, []);
-
+function AppRoutes() {
   return (
-    <div>
-      <header className="App-header">
-        <a
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
+    <Routes>
+      <Route path="/auth" element={<AuthPage />} />
 
-function App() {
-  return (
-    <div className="App">
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
-    </div>
+      <Route path="/" element={<PublicShell><HomePage /></PublicShell>} />
+      <Route path="/clans" element={<PublicShell><ClansPage /></PublicShell>} />
+      <Route path="/clans/:id" element={<PublicShell><ClanDetailPage /></PublicShell>} />
+      <Route path="/matches" element={<PublicShell><MatchesPage /></PublicShell>} />
+      <Route path="/players" element={<PublicShell><PlayersPage /></PublicShell>} />
+      <Route path="/leaderboard" element={<PublicShell><LeaderboardPage /></PublicShell>} />
+      <Route path="/rules" element={<PublicShell><RulesPage /></PublicShell>} />
+
+      <Route path="/matches/:id" element={<Protected><Layout><MatchDetailPage /></Layout></Protected>} />
+      <Route path="/me" element={<Protected><Layout><ProfilePage /></Layout></Protected>} />
+      <Route path="/admin" element={<Protected><Layout><AdminPage /></Layout></Protected>} />
+
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <AppRoutes />
+        <Toaster position="top-center" theme="dark" richColors />
+      </BrowserRouter>
+    </AuthProvider>
+  );
+}
