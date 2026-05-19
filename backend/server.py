@@ -618,6 +618,10 @@ def _count_maps(maps: list) -> tuple[int, int]:
     )
 
 
+POINTS_WIN = 3
+POINTS_LOSS = -1
+POINTS_WITHDRAW = -3
+
 async def _maybe_finish(match: dict):
     """If a team has won MAPS_TO_WIN maps, finalize match."""
     won_a, won_b = _count_maps(match["maps"])
@@ -638,8 +642,8 @@ async def _maybe_finish(match: dict):
         "score_b": won_b,
         "finished_at": iso(now_utc()),
     }})
-    await db.clans.update_one({"id": winner}, {"$inc": {"wins": 1, "points": 25}})
-    await db.clans.update_one({"id": loser}, {"$inc": {"losses": 1, "points": -10}})
+    await db.clans.update_one({"id": winner}, {"$inc": {"wins": 1, "points": POINTS_WIN}})
+    await db.clans.update_one({"id": loser}, {"$inc": {"losses": 1, "points": POINTS_LOSS}})
 
 
 @api.post("/matches")
@@ -787,6 +791,61 @@ async def dispute_match(match_id: str, user: dict = Depends(get_current_user)):
             break
     await db.matches.update_one({"id": match_id}, {"$set": {"maps": match["maps"]}})
     return {"ok": True}
+
+
+@api.post("/matches/{match_id}/withdraw")
+async def withdraw_match(match_id: str, user: dict = Depends(get_current_user)):
+    """A clan leader/vice withdraws their clan from a live match.
+    - Withdrawing clan: -3 points, +1 loss
+    - Other clan: +3 points, +1 win
+    """
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    if match["status"] != "live":
+        raise HTTPException(400, "المباراة منتهية")
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
+    staff_b = [b["leader_id"]] + b.get("vice_leader_ids", [])
+    if user["id"] in staff_a:
+        withdrawing_clan = a["id"]
+        winning_clan = b["id"]
+    elif user["id"] in staff_b:
+        withdrawing_clan = b["id"]
+        winning_clan = a["id"]
+    else:
+        raise HTTPException(403, "فقط القائد أو نوابه يستطيع الانسحاب")
+    won_a, won_b = _count_maps(match["maps"])
+    await db.matches.update_one({"id": match_id}, {"$set": {
+        "status": "finished",
+        "winner_clan_id": winning_clan,
+        "withdrawn_clan_id": withdrawing_clan,
+        "score_a": won_a,
+        "score_b": won_b,
+        "finished_at": iso(now_utc()),
+    }})
+    await db.clans.update_one({"id": winning_clan}, {"$inc": {"wins": 1, "points": POINTS_WIN}})
+    await db.clans.update_one({"id": withdrawing_clan}, {"$inc": {"losses": 1, "points": POINTS_WITHDRAW}})
+    # Post a system message in the chat
+    sys_msg = {
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": "system",
+        "username": "النظام",
+        "user_role": "admin",
+        "user_clan_id": None,
+        "type": "text",
+        "text": "⚠️ انسحب الكلان من المباراة. الفوز للخصم.",
+        "image": None,
+        "video": None,
+        "opponent_decision": None,
+        "admin_decision": None,
+        "admin_note": "",
+        "created_at": iso(now_utc()),
+    }
+    await db.chat_messages.insert_one(sys_msg)
+    return {"ok": True, "withdrawn_clan_id": withdrawing_clan, "winning_clan_id": winning_clan}
 
 
 # ---------------- CHAT ----------------
@@ -995,6 +1054,9 @@ async def get_limits():
         "vice_plus": VICE_LIMIT_PLUS,
         "bo_total": BO_TOTAL,
         "maps_to_win": MAPS_TO_WIN,
+        "points_win": POINTS_WIN,
+        "points_loss": POINTS_LOSS,
+        "points_withdraw": POINTS_WITHDRAW,
     }
 
 

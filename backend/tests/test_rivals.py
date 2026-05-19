@@ -274,11 +274,11 @@ def test_vote_map_agreement_and_finish(match, leader_a, leader_b):
     assert final["score_a"] == 2
     assert final["score_b"] == 0
 
-    # Verify points awarded (+25 / -10)
+    # Verify points awarded (+3 / -1)
     cdetail_a = requests.get(f"{API}/clans/{ca}").json()
     cdetail_b = requests.get(f"{API}/clans/{cb}").json()
-    assert cdetail_a["points"] == 25
-    assert cdetail_b["points"] == -10
+    assert cdetail_a["points"] == 3
+    assert cdetail_b["points"] == -1
     assert cdetail_a["wins"] == 1
     assert cdetail_b["losses"] == 1
 
@@ -416,4 +416,46 @@ def test_chat_write_blocked_for_outsiders(chat_match):
     s, u, t, _ = _register("outwrite")
     h = {"Authorization": f"Bearer {t}"}
     r = requests.post(f"{API}/matches/{mid}/chat", headers=h, json={"text": "hi"})
+    assert r.status_code == 403
+
+
+# ---- Withdraw ----
+def test_withdraw_match(leader_a, leader_b):
+    """Leader A withdraws -> -3 for A, +3 for B, match finished."""
+    ca = leader_a["clan"]
+    cb = leader_b["clan"]
+    h_a = {"Authorization": f"Bearer {leader_a['token']}"}
+    # Create fresh match
+    m = requests.post(f"{API}/matches", headers=h_a,
+                      json={"clan_a_id": ca["id"], "clan_b_id": cb["id"]})
+    assert m.status_code == 200
+    mid = m.json()["id"]
+    pts_a_before = requests.get(f"{API}/clans/{ca['id']}").json()["points"]
+    pts_b_before = requests.get(f"{API}/clans/{cb['id']}").json()["points"]
+    # Withdraw
+    w = requests.post(f"{API}/matches/{mid}/withdraw", headers=h_a)
+    assert w.status_code == 200
+    assert w.json()["withdrawn_clan_id"] == ca["id"]
+    assert w.json()["winning_clan_id"] == cb["id"]
+    # Verify state
+    mm = requests.get(f"{API}/matches/{mid}").json()
+    assert mm["status"] == "finished"
+    assert mm["winner_clan_id"] == cb["id"]
+    assert mm["withdrawn_clan_id"] == ca["id"]
+    # Points
+    pts_a_after = requests.get(f"{API}/clans/{ca['id']}").json()["points"]
+    pts_b_after = requests.get(f"{API}/clans/{cb['id']}").json()["points"]
+    assert pts_a_after - pts_a_before == -3
+    assert pts_b_after - pts_b_before == 3
+
+
+def test_withdraw_outsider_forbidden(leader_a, leader_b):
+    ca = leader_a["clan"]
+    cb = leader_b["clan"]
+    h_a = {"Authorization": f"Bearer {leader_a['token']}"}
+    m = requests.post(f"{API}/matches", headers=h_a,
+                      json={"clan_a_id": ca["id"], "clan_b_id": cb["id"]})
+    mid = m.json()["id"]
+    s, _u, t, _e = _register("outwithdraw")
+    r = requests.post(f"{API}/matches/{mid}/withdraw", headers={"Authorization": f"Bearer {t}"})
     assert r.status_code == 403

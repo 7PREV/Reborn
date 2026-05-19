@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { Send, Image as ImageIcon, Video, Shield, Flag, Lock } from "lucide-react";
+import { Send, Image as ImageIcon, Video, Shield, Flag, Lock, LogOut } from "lucide-react";
 import { toast } from "sonner";
 import MapsBoard from "../components/match/MapsBoard";
 import ChatMessage from "../components/match/ChatMessage";
@@ -20,7 +20,7 @@ function readAsDataURL(file) {
   });
 }
 
-function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute }) {
+function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute, onWithdraw }) {
   return (
     <div className="bg-surface border b-soft rounded-xl p-6 md:p-8">
       <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
@@ -31,14 +31,21 @@ function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute }) {
               <span className="text-xs uppercase tracking-widest text-destructive font-bold">مباشر</span>
             </>
           ) : (
-            <span className="text-xs uppercase tracking-widest text-white/40">منتهية</span>
+            <span className="text-xs uppercase tracking-widest text-white/40">
+              {match.withdrawn_clan_id ? "انسحاب" : "منتهية"}
+            </span>
           )}
           <span className="text-xs text-white/40 mr-3">| {match.game} • BO3</span>
         </div>
         {match.status === "live" && (isLeaderA || isLeaderB) && (
-          <button data-testid="dispute-btn" onClick={onDispute} className="px-3 py-1.5 rounded-md border border-destructive/40 text-destructive text-sm hover:bg-destructive/10 flex items-center gap-1">
-            <Flag size={14} /> نزاع — استدعاء المنظم
-          </button>
+          <div className="flex gap-2 flex-wrap">
+            <button data-testid="withdraw-btn" onClick={onWithdraw} className="px-3 py-1.5 rounded-md border border-destructive/40 text-destructive text-sm hover:bg-destructive/10 flex items-center gap-1">
+              <LogOut size={14} /> انسحاب (-3 نقاط)
+            </button>
+            <button data-testid="dispute-btn" onClick={onDispute} className="px-3 py-1.5 rounded-md border border-destructive/40 text-destructive text-sm hover:bg-destructive/10 flex items-center gap-1">
+              <Flag size={14} /> نزاع
+            </button>
+          </div>
         )}
       </div>
 
@@ -46,6 +53,9 @@ function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute }) {
         <Link to={`/clans/${match.clan_a?.id}`} className="text-right group">
           <div className="text-xs text-gold-500 uppercase tracking-widest">[{match.clan_a?.tag}]</div>
           <div className="font-display font-black text-2xl md:text-4xl group-hover:text-gold-500 transition">{match.clan_a?.name}</div>
+          {match.withdrawn_clan_id === match.clan_a?.id && (
+            <div className="text-[10px] uppercase tracking-widest text-destructive mt-1">منسحب</div>
+          )}
         </Link>
         <div className="text-center">
           <div className="font-display font-black text-4xl md:text-6xl">
@@ -58,6 +68,9 @@ function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute }) {
         <Link to={`/clans/${match.clan_b?.id}`} className="text-left group">
           <div className="text-xs text-gold-500 uppercase tracking-widest">[{match.clan_b?.tag}]</div>
           <div className="font-display font-black text-2xl md:text-4xl group-hover:text-gold-500 transition">{match.clan_b?.name}</div>
+          {match.withdrawn_clan_id === match.clan_b?.id && (
+            <div className="text-[10px] uppercase tracking-widest text-destructive mt-1">منسحب</div>
+          )}
         </Link>
       </div>
     </div>
@@ -219,6 +232,17 @@ export default function MatchDetailPage() {
     } catch (err) { handleErr(err); }
   };
 
+  const withdraw = async () => {
+    // eslint-disable-next-line no-alert
+    if (!confirm("هل أنت متأكد؟ سيتم خصم 3 نقاط من كلانك وفوز الخصم.")) return;
+    try {
+      await api.post(`/matches/${id}/withdraw`);
+      toast.success("تم الانسحاب من المباراة");
+      loadMatch();
+      loadChat();
+    } catch (err) { handleErr(err); }
+  };
+
   const opponentDecide = async (msgId, decision) => {
     try {
       await api.post(`/chat/${msgId}/opponent-decision`, { decision });
@@ -248,7 +272,8 @@ export default function MatchDetailPage() {
     <div className="space-y-6">
       <MatchHeader
         match={match} wonA={wonA} wonB={wonB}
-        isLeaderA={isLeaderA} isLeaderB={isLeaderB} onDispute={dispute}
+        isLeaderA={isLeaderA} isLeaderB={isLeaderB}
+        onDispute={dispute} onWithdraw={withdraw}
       />
       <div className="bg-surface border b-soft rounded-xl p-6 md:p-8 -mt-6">
         <MapsBoard
