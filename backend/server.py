@@ -5,6 +5,7 @@ load_dotenv(ROOT_DIR / '.env')
 
 import os
 import uuid
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
@@ -228,6 +229,37 @@ class RuleIn(BaseModel):
 
 
 # ---------------- Startup ----------------
+async def _cleanup_old_chat_messages() -> int:
+    """Delete chat messages older than 24h + their video files. Returns count deleted."""
+    cutoff_iso = iso(now_utc() - timedelta(hours=24))
+    cursor = db.chat_messages.find(
+        {"created_at": {"$lt": cutoff_iso}}, {"_id": 0, "video": 1}
+    )
+    deleted_files = 0
+    async for msg in cursor:
+        v = msg.get("video")
+        if v and isinstance(v, str) and v.startswith("/api/uploads/videos/"):
+            fname = v.rsplit("/", 1)[-1]
+            fpath = UPLOAD_DIR / fname
+            if fpath.exists():
+                fpath.unlink(missing_ok=True)
+                deleted_files += 1
+    result = await db.chat_messages.delete_many({"created_at": {"$lt": cutoff_iso}})
+    if result.deleted_count or deleted_files:
+        logger.info(f"Cleanup: removed {result.deleted_count} messages, {deleted_files} video files")
+    return result.deleted_count
+
+
+async def _periodic_cleanup_loop() -> None:
+    """Background loop running every hour."""
+    while True:
+        try:
+            await _cleanup_old_chat_messages()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Cleanup loop error: {exc}")
+        await asyncio.sleep(3600)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     await db.users.create_index("email", unique=True)
@@ -314,6 +346,9 @@ async def startup() -> None:
 - GET  /api/auth/me
 """
     )
+
+    # Start background cleanup task (24h chat messages + video files)
+    asyncio.create_task(_periodic_cleanup_loop())
 
 
 @app.on_event("shutdown")
