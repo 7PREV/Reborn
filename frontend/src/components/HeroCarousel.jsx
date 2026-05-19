@@ -32,10 +32,11 @@ export default function HeroCarousel() {
       <img
         src={current.image}
         alt={current.title}
-        className="absolute inset-0 w-full h-full object-cover opacity-50 transition-opacity duration-700"
+        className="absolute inset-0 w-full h-full object-cover opacity-90 transition-opacity duration-700"
         key={current.id}
       />
-      <div className="absolute inset-0 bg-gradient-to-l from-[#0a0a0b] via-[#0a0a0bdd] to-[#0a0a0b66]" />
+      <div className="absolute inset-0 bg-gradient-to-l from-[#0a0a0bcc] via-[#0a0a0b55] to-[#0a0a0b00]" />
+      <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-[#0a0a0b] to-transparent" />
       <div className="relative p-8 md:p-14 h-full flex flex-col justify-end">
         <div className="text-xs uppercase tracking-[0.3em] text-gold-500 mb-3">
           {current.link ? "إعلان" : "بطولات • كلانات • مجد"}

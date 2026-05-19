@@ -8,7 +8,6 @@ import MapsBoard from "../components/match/MapsBoard";
 import ChatMessage from "../components/match/ChatMessage";
 
 const IMG_MAX = 3_000_000;
-const VID_MAX = 10_000_000;
 const POLL_MS = 4000;
 
 function readAsDataURL(file) {
@@ -18,6 +17,21 @@ function readAsDataURL(file) {
     r.onerror = reject;
     r.readAsDataURL(file);
   });
+}
+
+async function uploadVideo(file, onProgress) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post("/upload/video", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    onUploadProgress: (e) => {
+      if (e.total && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    },
+    timeout: 0,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+  return data.url;
 }
 
 function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute, onWithdraw }) {
@@ -77,9 +91,21 @@ function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute, onWit
   );
 }
 
-function ChatComposer({ text, image, video, onText, onImage, onVideo, onClearImage, onClearVideo, onSubmit }) {
+function ChatComposer({ text, image, video, videoProgress, isPlus, onText, onImage, onVideo, onClearImage, onClearVideo, onSubmit }) {
+  const maxMB = isPlus ? 500 : 100;
   return (
     <form onSubmit={onSubmit} className="border-t b-soft p-3 space-y-2" data-testid="chat-form">
+      {videoProgress > 0 && (
+        <div className="bg-background border b-soft rounded-md p-2">
+          <div className="flex items-center justify-between text-xs text-white/60 mb-1">
+            <span>جارٍ رفع الفيديو...</span>
+            <span>{videoProgress}%</span>
+          </div>
+          <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+            <div className="h-full bg-gold-500 transition-all" style={{ width: `${videoProgress}%` }} />
+          </div>
+        </div>
+      )}
       {(image || video) && (
         <div className="flex gap-2">
           {image && (
@@ -90,8 +116,11 @@ function ChatComposer({ text, image, video, onText, onImage, onVideo, onClearIma
           )}
           {video && (
             <div className="relative">
-              <video src={video} className="h-16 w-16 rounded object-cover border b-soft" />
+              <div className="h-16 w-16 rounded border b-soft bg-background grid place-items-center text-gold-500">
+                <Video size={20} />
+              </div>
               <button type="button" onClick={onClearVideo} className="absolute -top-1 -right-1 bg-destructive rounded-full text-white text-xs w-4 h-4 grid place-items-center">×</button>
+              <div className="text-[10px] text-white/40 mt-1 max-w-[64px] truncate">{video.name}</div>
             </div>
           )}
         </div>
@@ -101,9 +130,9 @@ function ChatComposer({ text, image, video, onText, onImage, onVideo, onClearIma
           <ImageIcon size={20} />
           <input data-testid="chat-image-input" type="file" accept="image/*" onChange={onImage} className="hidden" />
         </label>
-        <label className="cursor-pointer p-2 rounded-md hover:bg-white/5 text-white/60" title="فيديو">
+        <label className="cursor-pointer p-2 rounded-md hover:bg-white/5 text-white/60" title={`فيديو (${maxMB}MB كحد أقصى)`}>
           <Video size={20} />
-          <input data-testid="chat-video-input" type="file" accept="video/*" onChange={onVideo} className="hidden" />
+          <input data-testid="chat-video-input" type="file" accept="video/*" onChange={onVideo} className="hidden" disabled={videoProgress > 0} />
         </label>
         <input
           data-testid="chat-input"
@@ -112,9 +141,12 @@ function ChatComposer({ text, image, video, onText, onImage, onVideo, onClearIma
           placeholder="اكتب رسالة..."
           className="flex-1 bg-background border b-soft rounded-md px-4 py-2 outline-none focus:border-gold-500/40"
         />
-        <button data-testid="send-chat" type="submit" className="px-4 py-2 rounded-md bg-gold-500 text-black hover:bg-gold-400 transition">
+        <button data-testid="send-chat" type="submit" disabled={videoProgress > 0} className="px-4 py-2 rounded-md bg-gold-500 text-black hover:bg-gold-400 transition disabled:opacity-50">
           <Send size={16} />
         </button>
+      </div>
+      <div className="text-[10px] text-white/40 text-center">
+        حد الفيديو: {maxMB}MB {!isPlus && "— ترقى لـ Plus لـ 500MB"}
       </div>
     </form>
   );
@@ -130,7 +162,8 @@ export default function MatchDetailPage() {
   const [userClanInChat, setUserClanInChat] = useState(null);
   const [text, setText] = useState("");
   const [image, setImage] = useState(null);
-  const [video, setVideo] = useState(null);
+  const [video, setVideo] = useState(null);     // {url, name, size}
+  const [videoProgress, setVideoProgress] = useState(0);
   const scrollRef = useRef(null);
 
   const loadMatch = useCallback(async () => {
@@ -193,8 +226,19 @@ export default function MatchDetailPage() {
   const onVideo = async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    if (f.size > VID_MAX) return toast.error("الفيديو كبير (الحد 10MB)");
-    setVideo(await readAsDataURL(f));
+    const maxMB = user?.is_plus ? 500 : 100;
+    if (f.size > maxMB * 1024 * 1024) {
+      return toast.error(`الفيديو كبير. الحد ${maxMB}MB` + (user?.is_plus ? "" : " — ترقى لـ Plus لزيادتها لـ 500MB"));
+    }
+    setVideoProgress(1);
+    try {
+      const url = await uploadVideo(f, setVideoProgress);
+      setVideo({ url, name: f.name, size: f.size });
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || "فشل رفع الفيديو");
+    } finally {
+      setVideoProgress(0);
+    }
   };
 
   const handleErr = (err) => toast.error(formatApiErrorDetail(err.response?.data?.detail));
@@ -203,7 +247,11 @@ export default function MatchDetailPage() {
     e.preventDefault();
     if (!text.trim() && !image && !video) return;
     try {
-      await api.post(`/matches/${id}/chat`, { text: text.trim(), image, video });
+      await api.post(`/matches/${id}/chat`, {
+        text: text.trim(),
+        image,
+        video: video?.url || null,
+      });
       setText(""); setImage(null); setVideo(null);
       loadChat();
     } catch (err) { handleErr(err); }
@@ -324,6 +372,8 @@ export default function MatchDetailPage() {
         {canWrite ? (
           <ChatComposer
             text={text} image={image} video={video}
+            videoProgress={videoProgress}
+            isPlus={!!user?.is_plus}
             onText={setText} onImage={onImage} onVideo={onVideo}
             onClearImage={() => setImage(null)}
             onClearVideo={() => setVideo(null)}

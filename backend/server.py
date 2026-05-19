@@ -11,7 +11,8 @@ from typing import List, Optional, Literal
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
@@ -653,6 +654,12 @@ def _count_maps(maps: list) -> tuple[int, int]:
 POINTS_WIN = 3
 POINTS_LOSS = -1
 POINTS_WITHDRAW = -3
+
+# Video upload limits
+PLUS_VIDEO_MAX_BYTES = 500 * 1024 * 1024     # 500 MB
+FREE_VIDEO_MAX_BYTES = 100 * 1024 * 1024     # 100 MB
+UPLOAD_DIR = ROOT_DIR / "uploads" / "videos"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 async def _maybe_finish(match: dict):
     """If a team has won MAPS_TO_WIN maps, finalize match."""
@@ -1430,7 +1437,43 @@ async def get_limits():
         "points_win": POINTS_WIN,
         "points_loss": POINTS_LOSS,
         "points_withdraw": POINTS_WITHDRAW,
+        "video_plus_mb": PLUS_VIDEO_MAX_BYTES // (1024 * 1024),
+        "video_free_mb": FREE_VIDEO_MAX_BYTES // (1024 * 1024),
     }
+
+
+@api.post("/upload/video")
+async def upload_video(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Upload a video file to disk; returns the URL. Limit depends on Plus."""
+    max_bytes = PLUS_VIDEO_MAX_BYTES if user_is_plus(user) else FREE_VIDEO_MAX_BYTES
+    ext = "mp4"
+    if file.filename and "." in file.filename:
+        candidate = file.filename.rsplit(".", 1)[-1].lower()
+        if candidate in ("mp4", "webm", "mov", "mkv", "avi"):
+            ext = candidate
+    fname = f"{uuid.uuid4()}.{ext}"
+    dest = UPLOAD_DIR / fname
+    written = 0
+    CHUNK = 1024 * 1024
+    try:
+        with dest.open("wb") as out:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    out.close()
+                    dest.unlink(missing_ok=True)
+                    limit_mb = max_bytes // (1024 * 1024)
+                    msg = f"الفيديو كبير. الحد الأقصى {limit_mb}MB"
+                    if not user_is_plus(user):
+                        msg += " — ترقى لـ Plus للحصول على 500MB"
+                    raise HTTPException(400, msg)
+                out.write(chunk)
+    finally:
+        await file.close()
+    return {"url": f"/api/uploads/videos/{fname}", "size": written}
 
 
 @api.get("/")
@@ -1439,6 +1482,9 @@ async def root():
 
 
 app.include_router(api)
+
+# Serve uploaded videos via /api/uploads/videos/*
+app.mount("/api/uploads/videos", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,
