@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api";
 import { Trophy, Swords, Users, Shield, Flame } from "lucide-react";
+import HeroCarousel from "../components/HeroCarousel";
 
 function StatCard({ icon: Icon, label, value, testid }) {
   return (
@@ -69,44 +70,7 @@ export default function HomePage() {
 
   return (
     <div className="space-y-10">
-      {/* Hero */}
-      <section className="relative overflow-hidden rounded-xl border b-soft grain">
-        <img
-          src="https://images.unsplash.com/photo-1566304211221-a25fe7aacbe2?w=1600&q=80"
-          alt=""
-          className="absolute inset-0 w-full h-full object-cover opacity-30"
-        />
-        <div className="absolute inset-0 bg-gradient-to-l from-[#0a0a0b] via-[#0a0a0bcc] to-[#0a0a0b88]" />
-        <div className="relative p-8 md:p-14">
-          <div className="text-xs uppercase tracking-[0.3em] text-gold-500 mb-3">
-            بطولات • كلانات • مجد
-          </div>
-          <h1 className="font-display font-black text-4xl md:text-5xl lg:text-6xl leading-[1.05] max-w-3xl">
-            حلبة <span className="gold-text">الأبطال</span>
-            <br />
-            تبدأ من هنا.
-          </h1>
-          <p className="mt-5 text-white/60 max-w-xl">
-            تابع المباريات الحية، شارك في التحديات، وكوّن كلانك الخاص. كل دقيقة بطولة.
-          </p>
-          <div className="mt-7 flex gap-3 flex-wrap">
-            <Link
-              to="/clans"
-              data-testid="cta-clans"
-              className="px-5 py-3 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 transition"
-            >
-              استكشف الكلانات
-            </Link>
-            <Link
-              to="/matches"
-              data-testid="cta-matches"
-              className="px-5 py-3 rounded-md border b-soft hover:bg-white/5 transition"
-            >
-              المباريات الحية
-            </Link>
-          </div>
-        </div>
-      </section>
+      <HeroCarousel />
 
       {/* Stats */}
       <section className="grid grid-cols-2 md:grid-cols-4 gap-4">

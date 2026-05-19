@@ -1362,6 +1362,56 @@ async def start_tournament(tid: str, user: dict = Depends(get_current_user)):
     return await _enrich_tournament(final)
 
 
+class BannerIn(BaseModel):
+    title: str = Field(min_length=2, max_length=80)
+    subtitle: Optional[str] = ""
+    image: str  # URL or base64 data URL
+    link: Optional[str] = None
+    active: bool = True
+    order: int = 0
+
+
+@api.get("/banners")
+async def list_banners():
+    docs = await db.banners.find({"active": True}, {"_id": 0}).sort("order", 1).to_list(20)
+    return docs
+
+
+@api.get("/admin/banners")
+async def list_all_banners(user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    docs = await db.banners.find({}, {"_id": 0}).sort("order", 1).to_list(50)
+    return docs
+
+
+@api.post("/banners")
+async def create_banner(body: BannerIn, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    b = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": iso(now_utc())}
+    await db.banners.insert_one(b)
+    b.pop("_id", None)
+    return b
+
+
+@api.put("/banners/{bid}")
+async def update_banner(bid: str, body: BannerIn, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    await db.banners.update_one({"id": bid}, {"$set": body.model_dump()})
+    r = await db.banners.find_one({"id": bid}, {"_id": 0})
+    return r
+
+
+@api.delete("/banners/{bid}")
+async def delete_banner(bid: str, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    await db.banners.delete_one({"id": bid})
+    return {"ok": True}
+
+
 # ---------------- META ----------------
 @api.get("/games")
 async def list_games():

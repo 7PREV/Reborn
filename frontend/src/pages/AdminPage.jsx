@@ -4,6 +4,7 @@ import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
 import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search } from "lucide-react";
 import { toast } from "sonner";
+import BannerManager from "../components/admin/BannerManager";
 
 function UserRoleManager() {
   const { user } = useAuth();
@@ -180,6 +181,7 @@ export default function AdminPage() {
       )}
 
       <UserRoleManager />
+      <BannerManager />
     </div>
   );
 }
