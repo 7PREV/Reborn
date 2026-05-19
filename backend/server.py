@@ -97,12 +97,14 @@ def sanitize_user(u: dict) -> dict:
         "id": u["id"],
         "email": u["email"],
         "username": u["username"],
+        "act": u.get("act", ""),
         "role": u.get("role", "player"),
         "clan_id": u.get("clan_id"),
         "points": u.get("points", 0),
         "avatar": u.get("avatar"),
         "is_plus": user_is_plus(u),
         "plus_expires_at": u.get("plus_expires_at"),
+        "clan_cooldown_until": u.get("clan_cooldown_until"),
         "created_at": u.get("created_at"),
     }
 
@@ -170,6 +172,7 @@ class RegisterIn(BaseModel):
     email: EmailStr
     username: str = Field(min_length=2, max_length=30)
     password: str = Field(min_length=6, max_length=128)
+    act: str = Field(min_length=2, max_length=40)  # In-game COD name
 
 
 class LoginIn(BaseModel):
@@ -368,12 +371,14 @@ async def register(body: RegisterIn, response: Response):
         "id": str(uuid.uuid4()),
         "email": email,
         "username": body.username,
+        "act": body.act.strip(),
         "password_hash": hash_pw(body.password),
         "role": "player",
         "points": 0,
         "clan_id": None,
         "avatar": None,
         "is_plus": False,
+        "clan_cooldown_until": None,
         "created_at": iso(now_utc()),
     }
     await db.users.insert_one(user)
