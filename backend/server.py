@@ -793,30 +793,8 @@ async def dispute_match(match_id: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
-@api.post("/matches/{match_id}/withdraw")
-async def withdraw_match(match_id: str, user: dict = Depends(get_current_user)):
-    """A clan leader/vice withdraws their clan from a live match.
-    - Withdrawing clan: -3 points, +1 loss
-    - Other clan: +3 points, +1 win
-    """
-    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
-    if not match:
-        raise HTTPException(404, "غير موجود")
-    if match["status"] != "live":
-        raise HTTPException(400, "المباراة منتهية")
-    a = await _get_clan(match["clan_a_id"])
-    b = await _get_clan(match["clan_b_id"])
-    staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
-    staff_b = [b["leader_id"]] + b.get("vice_leader_ids", [])
-    if user["id"] in staff_a:
-        withdrawing_clan = a["id"]
-        winning_clan = b["id"]
-    elif user["id"] in staff_b:
-        withdrawing_clan = b["id"]
-        winning_clan = a["id"]
-    else:
-        raise HTTPException(403, "فقط القائد أو نوابه يستطيع الانسحاب")
-    won_a, won_b = _count_maps(match["maps"])
+async def _finalize_withdrawal(match_id: str, withdrawing_clan: str, winning_clan: str, won_a: int, won_b: int) -> None:
+    """Apply DB updates for a withdrawal: match state, points, system chat message."""
     await db.matches.update_one({"id": match_id}, {"$set": {
         "status": "finished",
         "winner_clan_id": winning_clan,
@@ -827,8 +805,7 @@ async def withdraw_match(match_id: str, user: dict = Depends(get_current_user)):
     }})
     await db.clans.update_one({"id": winning_clan}, {"$inc": {"wins": 1, "points": POINTS_WIN}})
     await db.clans.update_one({"id": withdrawing_clan}, {"$inc": {"losses": 1, "points": POINTS_WITHDRAW}})
-    # Post a system message in the chat
-    sys_msg = {
+    await db.chat_messages.insert_one({
         "id": str(uuid.uuid4()),
         "match_id": match_id,
         "user_id": "system",
@@ -837,14 +814,34 @@ async def withdraw_match(match_id: str, user: dict = Depends(get_current_user)):
         "user_clan_id": None,
         "type": "text",
         "text": "⚠️ انسحب الكلان من المباراة. الفوز للخصم.",
-        "image": None,
-        "video": None,
-        "opponent_decision": None,
-        "admin_decision": None,
-        "admin_note": "",
+        "image": None, "video": None,
+        "opponent_decision": None, "admin_decision": None, "admin_note": "",
         "created_at": iso(now_utc()),
-    }
-    await db.chat_messages.insert_one(sys_msg)
+    })
+
+
+@api.post("/matches/{match_id}/withdraw")
+async def withdraw_match(match_id: str, user: dict = Depends(get_current_user)):
+    """Clan leader/vice withdraws their clan from a live match (-3 pts, opponent +3)."""
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    if match["status"] != "live":
+        raise HTTPException(400, "المباراة منتهية")
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
+    staff_b = [b["leader_id"]] + b.get("vice_leader_ids", [])
+    withdrawing_clan: str
+    winning_clan: str
+    if user["id"] in staff_a:
+        withdrawing_clan, winning_clan = a["id"], b["id"]
+    elif user["id"] in staff_b:
+        withdrawing_clan, winning_clan = b["id"], a["id"]
+    else:
+        raise HTTPException(403, "فقط القائد أو نوابه يستطيع الانسحاب")
+    won_a, won_b = _count_maps(match["maps"])
+    await _finalize_withdrawal(match_id, withdrawing_clan, winning_clan, won_a, won_b)
     return {"ok": True, "withdrawn_clan_id": withdrawing_clan, "winning_clan_id": winning_clan}
 
 
