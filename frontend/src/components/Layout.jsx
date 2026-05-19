@@ -1,6 +1,6 @@
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
-import { Trophy, Users, Swords, LogOut, Shield, Home as HomeIcon, ScrollText, Crown, Sparkles } from "lucide-react";
+import { Trophy, Users, Swords, LogOut, Shield, Home as HomeIcon, ScrollText, Crown, Sparkles, Award } from "lucide-react";
 
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
@@ -8,10 +8,11 @@ export default function Layout({ children }) {
 
   const nav = [
     { to: "/", label: "الرئيسية", icon: HomeIcon, id: "nav-home" },
+    { to: "/tournaments", label: "البطولات", icon: Award, id: "nav-tournaments" },
     { to: "/matches", label: "المباريات", icon: Swords, id: "nav-matches" },
     { to: "/clans", label: "الكلانات", icon: Shield, id: "nav-clans" },
     { to: "/players", label: "اللاعبون", icon: Users, id: "nav-players" },
-    { to: "/leaderboard", label: "لوحة النتائج", icon: Trophy, id: "nav-leaderboard" },
+    { to: "/leaderboard", label: "النتائج", icon: Trophy, id: "nav-leaderboard" },
     { to: "/rules", label: "القوانين", icon: ScrollText, id: "nav-rules" },
   ];
 
@@ -54,13 +55,13 @@ export default function Layout({ children }) {
 
           <div className="flex-1" />
 
-          {user && user.role === "admin" && (
+          {user && (user.role === "admin" || user.role === "owner") && (
             <NavLink
               to="/admin"
               data-testid="nav-admin"
               className="hidden md:inline-flex items-center gap-1.5 text-xs uppercase tracking-widest text-gold-500 hover:text-gold-400 border border-gold-500/30 rounded-md px-3 py-1.5"
             >
-              <Crown size={14} /> لوحة الإدارة
+              <Crown size={14} /> {user.role === "owner" ? "لوحة المالك" : "لوحة الإدارة"}
             </NavLink>
           )}
 
@@ -79,7 +80,7 @@ export default function Layout({ children }) {
                     {user.is_plus && <Sparkles size={10} className="text-gold-500" />}
                   </div>
                   <div className="text-[10px] uppercase tracking-widest text-white/40">
-                    {user.role === "admin" ? "منظم" : user.is_plus ? "Plus" : "لاعب"}
+                    {user.role === "owner" ? "مالك" : user.role === "admin" ? "منظم" : user.is_plus ? "Plus" : "لاعب"}
                   </div>
                 </div>
               </Link>
@@ -119,7 +120,7 @@ export default function Layout({ children }) {
               {n.label}
             </NavLink>
           ))}
-          {user?.role === "admin" && (
+          {user?.role === "admin" || user?.role === "owner" ? (
             <NavLink
               to="/admin"
               className={({ isActive }) =>
@@ -128,9 +129,9 @@ export default function Layout({ children }) {
                 }`
               }
             >
-              <Crown size={14} /> الإدارة
+              <Crown size={14} /> {user.role === "owner" ? "المالك" : "الإدارة"}
             </NavLink>
-          )}
+          ) : null}
         </nav>
       </header>
 

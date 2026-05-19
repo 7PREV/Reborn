@@ -12,6 +12,8 @@ import LeaderboardPage from "./pages/LeaderboardPage";
 import ProfilePage from "./pages/ProfilePage";
 import AdminPage from "./pages/AdminPage";
 import RulesPage from "./pages/RulesPage";
+import TournamentsPage from "./pages/TournamentsPage";
+import TournamentDetailPage from "./pages/TournamentDetailPage";
 import { Toaster } from "sonner";
 
 function Protected({ children }) {
@@ -39,6 +41,8 @@ function AppRoutes() {
       <Route path="/players" element={<PublicShell><PlayersPage /></PublicShell>} />
       <Route path="/leaderboard" element={<PublicShell><LeaderboardPage /></PublicShell>} />
       <Route path="/rules" element={<PublicShell><RulesPage /></PublicShell>} />
+      <Route path="/tournaments" element={<PublicShell><TournamentsPage /></PublicShell>} />
+      <Route path="/tournaments/:id" element={<PublicShell><TournamentDetailPage /></PublicShell>} />
 
       <Route path="/matches/:id" element={<Protected><Layout><MatchDetailPage /></Layout></Protected>} />
       <Route path="/me" element={<Protected><Layout><ProfilePage /></Layout></Protected>} />

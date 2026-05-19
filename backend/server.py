@@ -68,6 +68,15 @@ def make_token(user_id: str, email: str, role: str) -> str:
     }, JWT_SECRET, algorithm=JWT_ALG)
 
 
+def is_staff(user: dict) -> bool:
+    """Owner or admin both count as staff for moderation tasks."""
+    return user.get("role") in ("owner", "admin")
+
+
+def is_owner(user: dict) -> bool:
+    return user.get("role") == "owner"
+
+
 def user_is_plus(u: dict) -> bool:
     """Effective Plus: manual flag OR temporary expiry not yet passed."""
     if u.get("is_plus"):
@@ -229,6 +238,7 @@ async def startup() -> None:
     await db.join_requests.create_index([("clan_id", 1), ("user_id", 1)])
     await db.rules.create_index("order")
 
+    # Seed admin (regular admin)
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@rivals.gg")
     admin_pw = os.environ.get("ADMIN_PASSWORD", "Admin@12345")
     existing = await db.users.find_one({"email": admin_email})
@@ -251,6 +261,28 @@ async def startup() -> None:
             {"email": admin_email},
             {"$set": {"password_hash": hash_pw(admin_pw), "role": "admin"}}
         )
+
+    # Seed Owner (single super-admin who manages admins)
+    owner_email = os.environ.get("OWNER_EMAIL", "prev@rivals.gg")
+    owner_username = os.environ.get("OWNER_USERNAME", "Prev")
+    owner_pw = os.environ.get("OWNER_PASSWORD", "Prev@Rivals2026")
+    existing_owner = await db.users.find_one({"email": owner_email})
+    if not existing_owner:
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "email": owner_email,
+            "username": owner_username,
+            "password_hash": hash_pw(owner_pw),
+            "role": "owner",
+            "points": 0,
+            "clan_id": None,
+            "avatar": None,
+            "is_plus": True,
+            "created_at": iso(now_utc()),
+        })
+        logger.info(f"Seeded owner: {owner_email}")
+    elif existing_owner.get("role") != "owner":
+        await db.users.update_one({"email": owner_email}, {"$set": {"role": "owner"}})
 
     # Seed default rules
     if await db.rules.count_documents({}) == 0:
@@ -374,7 +406,7 @@ async def _get_clan(clan_id: str) -> dict:
 
 
 def _is_clan_staff(clan: dict, user: dict) -> bool:
-    if user.get("role") == "admin":
+    if is_staff(user):
         return True
     return user["id"] == clan["leader_id"] or user["id"] in clan.get("vice_leader_ids", [])
 
@@ -439,7 +471,7 @@ async def get_clan_detail(clan_id: str):
 @api.delete("/clans/{clan_id}")
 async def delete_clan(clan_id: str, user: dict = Depends(get_current_user)):
     clan = await _get_clan(clan_id)
-    if user["id"] != clan["leader_id"] and user.get("role") != "admin":
+    if user["id"] != clan["leader_id"] and not is_staff(user):
         raise HTTPException(403, "ليس لديك صلاحية")
     await db.users.update_many({"clan_id": clan_id}, {"$set": {"clan_id": None}})
     await db.clans.delete_one({"id": clan_id})
@@ -561,7 +593,7 @@ async def respond_invite(inv_id: str, body: HandleRequestIn, user: dict = Depend
 @api.post("/clans/{clan_id}/kick/{member_id}")
 async def kick_member(clan_id: str, member_id: str, user: dict = Depends(get_current_user)):
     clan = await _get_clan(clan_id)
-    if user["id"] != clan["leader_id"] and user.get("role") != "admin":
+    if user["id"] != clan["leader_id"] and not is_staff(user):
         raise HTTPException(403, "فقط القائد أو المنظم")
     if member_id == clan["leader_id"]:
         raise HTTPException(400, "لا يمكن طرد القائد")
@@ -575,7 +607,7 @@ async def kick_member(clan_id: str, member_id: str, user: dict = Depends(get_cur
 @api.post("/clans/{clan_id}/promote/{member_id}")
 async def promote_vice(clan_id: str, member_id: str, user: dict = Depends(get_current_user)):
     clan = await _get_clan(clan_id)
-    if user["id"] != clan["leader_id"] and user.get("role") != "admin":
+    if user["id"] != clan["leader_id"] and not is_staff(user):
         raise HTTPException(403, "ليس لديك صلاحية")
     if member_id not in clan["member_ids"]:
         raise HTTPException(400, "ليس عضواً")
@@ -644,6 +676,10 @@ async def _maybe_finish(match: dict):
     }})
     await db.clans.update_one({"id": winner}, {"$inc": {"wins": 1, "points": POINTS_WIN}})
     await db.clans.update_one({"id": loser}, {"$inc": {"losses": 1, "points": POINTS_LOSS}})
+    # If part of a tournament, advance bracket
+    fresh_match = await db.matches.find_one({"id": match["id"]}, {"_id": 0})
+    if fresh_match and fresh_match.get("tournament_id"):
+        await _advance_tournament_winner(fresh_match, winner)
 
 
 @api.post("/matches")
@@ -652,7 +688,7 @@ async def create_match(body: MatchCreateIn, user: dict = Depends(get_current_use
     b = await _get_clan(body.clan_b_id)
     if a["id"] == b["id"]:
         raise HTTPException(400, "لا يمكن تحدي نفس الكلان")
-    if user.get("role") != "admin" and user["id"] not in (a["leader_id"], b["leader_id"]):
+    if not is_staff(user) and user["id"] not in (a["leader_id"], b["leader_id"]):
         raise HTTPException(403, "فقط المنظم أو قادة الكلانات")
     maps = [
         {"index": i, "vote_a": None, "vote_b": None, "winner": None, "disputed": False, "admin_resolved": False}
@@ -706,7 +742,7 @@ def _resolve_vote_side(user: dict, staff_a: list, staff_b: list) -> str:
         return "vote_a"
     if user["id"] in staff_b:
         return "vote_b"
-    if user.get("role") == "admin":
+    if is_staff(user):
         raise HTTPException(400, "المنظم يستخدم admin-resolve-map")
     raise HTTPException(403, "ليس لديك صلاحية")
 
@@ -753,7 +789,7 @@ async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_curr
 
 @api.post("/matches/{match_id}/admin-resolve-map")
 async def admin_resolve_map(match_id: str, body: AdminResolveMapIn, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
     match = await db.matches.find_one({"id": match_id}, {"_id": 0})
     if not match:
@@ -842,13 +878,17 @@ async def withdraw_match(match_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(403, "فقط القائد أو نوابه يستطيع الانسحاب")
     won_a, won_b = _count_maps(match["maps"])
     await _finalize_withdrawal(match_id, withdrawing_clan, winning_clan, won_a, won_b)
+    if match.get("tournament_id"):
+        fresh_match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+        if fresh_match:
+            await _advance_tournament_winner(fresh_match, winning_clan)
     return {"ok": True, "withdrawn_clan_id": withdrawing_clan, "winning_clan_id": winning_clan}
 
 
 # ---------------- CHAT ----------------
 async def _chat_perms(match: dict, user: dict):
     """Returns (can_view_text, can_write, can_admin_moderate, role_label, is_opponent_leader_for_msg)."""
-    is_admin = user.get("role") == "admin"
+    is_admin = is_staff(user)
     a = await db.clans.find_one({"id": match["clan_a_id"]})
     b = await db.clans.find_one({"id": match["clan_b_id"]})
     if not a or not b:
@@ -866,7 +906,7 @@ async def get_chat(match_id: str, user: dict = Depends(get_current_user)):
     m = await db.matches.find_one({"id": match_id}, {"_id": 0})
     if not m:
         raise HTTPException(404, "غير موجود")
-    is_admin = user.get("role") == "admin"
+    is_admin = is_staff(user)
     a = await _get_clan(m["clan_a_id"])
     b = await _get_clan(m["clan_b_id"])
     is_in_match = user.get("clan_id") in (m["clan_a_id"], m["clan_b_id"])
@@ -903,7 +943,7 @@ def _classify_message_type(body: ChatMessageIn) -> str:
 
 
 def _determine_chat_role(user: dict, a: dict, b: dict) -> str:
-    if user.get("role") == "admin":
+    if is_staff(user):
         return "admin"
     if user["id"] == a["leader_id"] or user["id"] == b["leader_id"]:
         return "leader"
@@ -940,7 +980,7 @@ async def post_chat(match_id: str, body: ChatMessageIn, user: dict = Depends(get
     b = await db.clans.find_one({"id": m["clan_b_id"]})
     staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
     staff_b = [b["leader_id"]] + b.get("vice_leader_ids", [])
-    is_admin = user.get("role") == "admin"
+    is_admin = is_staff(user)
     if not (is_admin or user["id"] in staff_a or user["id"] in staff_b):
         raise HTTPException(403, "لا يمكنك الكتابة في هذا الشات")
     msg = _build_chat_message(body, user, match_id, _determine_chat_role(user, a, b))
@@ -978,7 +1018,7 @@ async def opponent_decision(msg_id: str, body: OpponentImageDecisionIn, user: di
 
 @api.post("/chat/{msg_id}/admin-decision")
 async def admin_chat_decision(msg_id: str, body: AdminMediaDecisionIn, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
     msg = await db.chat_messages.find_one({"id": msg_id})
     if not msg:
@@ -1011,7 +1051,7 @@ async def list_rules():
 
 @api.post("/rules")
 async def create_rule(body: RuleIn, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
     rule = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": iso(now_utc())}
     await db.rules.insert_one(rule)
@@ -1021,7 +1061,7 @@ async def create_rule(body: RuleIn, user: dict = Depends(get_current_user)):
 
 @api.put("/rules/{rule_id}")
 async def update_rule(rule_id: str, body: RuleIn, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
     await db.rules.update_one({"id": rule_id}, {"$set": body.model_dump()})
     r = await db.rules.find_one({"id": rule_id}, {"_id": 0})
@@ -1030,10 +1070,296 @@ async def update_rule(rule_id: str, body: RuleIn, user: dict = Depends(get_curre
 
 @api.delete("/rules/{rule_id}")
 async def delete_rule(rule_id: str, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
     await db.rules.delete_one({"id": rule_id})
     return {"ok": True}
+
+
+# ---------------- ROLES (Owner only) ----------------
+class RoleChangeIn(BaseModel):
+    role: Literal["admin", "player"]
+
+
+@api.get("/admin/users")
+async def admin_list_users(user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    docs = await db.users.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return [sanitize_user(d) for d in docs]
+
+
+@api.post("/admin/users/{user_id}/role")
+async def change_user_role(user_id: str, body: RoleChangeIn, user: dict = Depends(get_current_user)):
+    if not is_owner(user):
+        raise HTTPException(403, "للمالك فقط")
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(404, "المستخدم غير موجود")
+    if target.get("role") == "owner":
+        raise HTTPException(400, "لا يمكن تغيير دور المالك")
+    await db.users.update_one({"id": user_id}, {"$set": {"role": body.role}})
+    return {"ok": True, "role": body.role}
+
+
+# ---------------- TOURNAMENTS (Single Elimination) ----------------
+class TournamentCreateIn(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    description: Optional[str] = ""
+    rules: Optional[str] = ""
+    max_participants: int = Field(ge=2, le=16)  # 2,4,8,12,16
+
+
+def _next_power_of_2(n: int) -> int:
+    p = 1
+    while p < n:
+        p *= 2
+    return p
+
+
+def _build_initial_bracket(clan_ids: list) -> list:
+    """Single-elimination bracket. Pads to next power of 2 with byes."""
+    import random
+    shuffled = clan_ids.copy()
+    random.shuffle(shuffled)
+    size = max(2, _next_power_of_2(len(shuffled)))
+    while len(shuffled) < size:
+        shuffled.append(None)
+    rounds = []
+    r1 = []
+    for i in range(0, size, 2):
+        a_id, b_id = shuffled[i], shuffled[i + 1]
+        slot = {"clan_a_id": a_id, "clan_b_id": b_id, "winner_id": None, "match_id": None}
+        # Bye handling: lone side auto-wins
+        if a_id and not b_id:
+            slot["winner_id"] = a_id
+        elif b_id and not a_id:
+            slot["winner_id"] = b_id
+        r1.append(slot)
+    rounds.append(r1)
+    n = len(r1)
+    while n > 1:
+        n //= 2
+        rounds.append([
+            {"clan_a_id": None, "clan_b_id": None, "winner_id": None, "match_id": None}
+            for _ in range(n)
+        ])
+    # Propagate byes from round 1 → round 2
+    if len(rounds) > 1:
+        for i, slot in enumerate(rounds[0]):
+            if slot["winner_id"]:
+                next_slot = i // 2
+                side = "clan_a_id" if i % 2 == 0 else "clan_b_id"
+                rounds[1][next_slot][side] = slot["winner_id"]
+    return rounds
+
+
+async def _create_round_matches(tournament: dict, round_index: int) -> None:
+    """Create live Match records for round `round_index` of the tournament."""
+    rnd = tournament["bracket"][round_index]
+    for slot_index, slot in enumerate(rnd):
+        if slot.get("match_id") or slot.get("winner_id"):
+            continue  # already created or already decided (bye)
+        a_id = slot.get("clan_a_id")
+        b_id = slot.get("clan_b_id")
+        if not a_id or not b_id:
+            continue
+        maps = [
+            {"index": i, "vote_a": None, "vote_b": None, "winner": None,
+             "disputed": False, "admin_resolved": False}
+            for i in range(BO_TOTAL)
+        ]
+        m = {
+            "id": str(uuid.uuid4()),
+            "clan_a_id": a_id,
+            "clan_b_id": b_id,
+            "game": "Call of Duty",
+            "status": "live",
+            "maps": maps,
+            "score_a": 0, "score_b": 0,
+            "winner_clan_id": None,
+            "notes": f"Tournament: {tournament['name']} • Round {round_index + 1}",
+            "tournament_id": tournament["id"],
+            "tournament_round": round_index,
+            "tournament_slot": slot_index,
+            "created_at": iso(now_utc()),
+            "finished_at": None,
+        }
+        await db.matches.insert_one(m)
+        slot["match_id"] = m["id"]
+    await db.tournaments.update_one(
+        {"id": tournament["id"]},
+        {"$set": {f"bracket.{round_index}": rnd}}
+    )
+
+
+async def _advance_tournament_winner(match: dict, winner_id: str) -> None:
+    """Called when a tournament match finishes. Advance winner to next round."""
+    tid = match.get("tournament_id")
+    if not tid:
+        return
+    tournament = await db.tournaments.find_one({"id": tid}, {"_id": 0})
+    if not tournament:
+        return
+    r_idx = match.get("tournament_round")
+    s_idx = match.get("tournament_slot")
+    if r_idx is None or s_idx is None:
+        return
+    tournament["bracket"][r_idx][s_idx]["winner_id"] = winner_id
+    # Move to next round
+    if r_idx + 1 < len(tournament["bracket"]):
+        next_slot = s_idx // 2
+        side = "clan_a_id" if s_idx % 2 == 0 else "clan_b_id"
+        tournament["bracket"][r_idx + 1][next_slot][side] = winner_id
+        await db.tournaments.update_one(
+            {"id": tid}, {"$set": {"bracket": tournament["bracket"]}}
+        )
+        # If both sides of the next slot are filled, create that match
+        ns = tournament["bracket"][r_idx + 1][next_slot]
+        if ns.get("clan_a_id") and ns.get("clan_b_id") and not ns.get("match_id"):
+            await _create_round_matches(tournament, r_idx + 1)
+    else:
+        # Final round — champion
+        await db.tournaments.update_one(
+            {"id": tid},
+            {"$set": {"bracket": tournament["bracket"], "status": "finished",
+                      "champion_clan_id": winner_id, "finished_at": iso(now_utc())}}
+        )
+
+
+@api.get("/tournaments")
+async def list_tournaments():
+    docs = await db.tournaments.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return docs
+
+
+async def _enrich_tournament(t: dict) -> dict:
+    """Resolve clan info for bracket display."""
+    ids = set()
+    for rnd in t.get("bracket", []):
+        for s in rnd:
+            for k in ("clan_a_id", "clan_b_id", "winner_id"):
+                if s.get(k):
+                    ids.add(s[k])
+    for cid in t.get("participants", []):
+        ids.add(cid)
+    if t.get("champion_clan_id"):
+        ids.add(t["champion_clan_id"])
+    clan_docs = await db.clans.find(
+        {"id": {"$in": list(ids)}}, {"_id": 0, "id": 1, "name": 1, "tag": 1}
+    ).to_list(200) if ids else []
+    t["clans"] = {c["id"]: c for c in clan_docs}
+    return t
+
+
+@api.get("/tournaments/{tid}")
+async def get_tournament(tid: str):
+    t = await db.tournaments.find_one({"id": tid}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "البطولة غير موجودة")
+    return await _enrich_tournament(t)
+
+
+@api.post("/tournaments")
+async def create_tournament(body: TournamentCreateIn, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    if body.max_participants not in (2, 4, 8, 12, 16):
+        raise HTTPException(400, "العدد يجب أن يكون 2, 4, 8, 12 أو 16")
+    now = now_utc()
+    t = {
+        "id": str(uuid.uuid4()),
+        "name": body.name,
+        "description": body.description or "",
+        "rules": body.rules or "",
+        "max_participants": body.max_participants,
+        "status": "registration",  # registration → live → finished
+        "starts_at": iso(now),
+        "plus_window_until": iso(now + timedelta(hours=24)),
+        "participants": [],
+        "bracket": [],
+        "champion_clan_id": None,
+        "created_by": user["id"],
+        "created_at": iso(now),
+        "finished_at": None,
+    }
+    await db.tournaments.insert_one(t)
+    t.pop("_id", None)
+    return await _enrich_tournament(t)
+
+
+@api.delete("/tournaments/{tid}")
+async def delete_tournament(tid: str, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    t = await db.tournaments.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404, "غير موجودة")
+    # Cancel any live matches
+    await db.matches.update_many(
+        {"tournament_id": tid, "status": "live"},
+        {"$set": {"status": "finished", "finished_at": iso(now_utc())}}
+    )
+    await db.tournaments.delete_one({"id": tid})
+    return {"ok": True}
+
+
+@api.post("/tournaments/{tid}/join")
+async def join_tournament(tid: str, user: dict = Depends(get_current_user)):
+    t = await db.tournaments.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404, "البطولة غير موجودة")
+    if t["status"] != "registration":
+        raise HTTPException(400, "التسجيل مغلق")
+    if not user.get("clan_id"):
+        raise HTTPException(400, "يجب أن تكون قائد كلان")
+    clan = await db.clans.find_one({"id": user["clan_id"]}, {"_id": 0})
+    if not clan or clan["leader_id"] != user["id"]:
+        raise HTTPException(403, "فقط القائد يسجل الكلان")
+    if clan["id"] in t.get("participants", []):
+        raise HTTPException(400, "كلانك مسجل بالفعل")
+    if len(t.get("participants", [])) >= t["max_participants"]:
+        raise HTTPException(400, "البطولة ممتلئة")
+    # Plus window enforcement
+    leader = await db.users.find_one({"id": clan["leader_id"]})
+    plus = user_is_plus(leader) if leader else False
+    try:
+        plus_until = datetime.fromisoformat(t["plus_window_until"])
+    except Exception:
+        plus_until = now_utc()
+    if not plus and now_utc() < plus_until:
+        raise HTTPException(400, "أول 24 ساعة للكلانات Plus فقط")
+    await db.tournaments.update_one(
+        {"id": tid}, {"$addToSet": {"participants": clan["id"]}}
+    )
+    return {"ok": True}
+
+
+@api.post("/tournaments/{tid}/start")
+async def start_tournament(tid: str, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    t = await db.tournaments.find_one({"id": tid}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "غير موجودة")
+    if t["status"] != "registration":
+        raise HTTPException(400, "البطولة بدأت بالفعل")
+    if len(t.get("participants", [])) < 2:
+        raise HTTPException(400, "يجب كلانَين على الأقل")
+    bracket = _build_initial_bracket(t["participants"])
+    await db.tournaments.update_one({"id": tid}, {"$set": {
+        "bracket": bracket, "status": "live"
+    }})
+    fresh = await db.tournaments.find_one({"id": tid}, {"_id": 0})
+    await _create_round_matches(fresh, 0)
+    # If first round had byes propagating directly into round 2 with both sides filled, create them
+    if len(fresh["bracket"]) > 1:
+        for slot_idx, slot in enumerate(fresh["bracket"][1]):
+            if slot.get("clan_a_id") and slot.get("clan_b_id") and not slot.get("match_id"):
+                await _create_round_matches(fresh, 1)
+                break
+    final = await db.tournaments.find_one({"id": tid}, {"_id": 0})
+    return await _enrich_tournament(final)
 
 
 # ---------------- META ----------------
