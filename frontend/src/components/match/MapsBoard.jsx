@@ -1,6 +1,80 @@
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Hourglass, Pause, Trophy } from "lucide-react";
+import { useEffect, useState } from "react";
 
-export default function MapsBoard({ match, isLeaderA, isLeaderB, isAdmin, onVote, onResolve }) {
+const formatRemaining = (ms) => {
+  if (ms <= 0) return "00:00";
+  const total = Math.floor(ms / 1000);
+  const m = String(Math.floor(total / 60)).padStart(2, "0");
+  const s = String(total % 60).padStart(2, "0");
+  return `${m}:${s}`;
+};
+
+function TimerBar({ mp, userSide, onGrace, onPrayer, onClaim }) {
+  const state = mp.grace_state || {};
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!state.active) return;
+    const t = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [state.active]);
+
+  const endsAt = state.ends_at ? new Date(state.ends_at) : null;
+  const remaining = endsAt ? endsAt - new Date() : 0;
+  const expired = state.active && !state.paused && remaining <= 0;
+  const isClaimer = userSide && state.started_by === userSide;
+  const isOpponent = userSide && state.started_by && state.started_by !== userSide;
+  const opponentAlreadyPrayed =
+    isOpponent && (mp.prayer_used_by_clan || []).includes(userSide);
+
+  return (
+    <div className="mt-2 pt-2 border-t b-soft space-y-2" data-testid={`timer-${mp.index}`}>
+      {!state.active && userSide && (
+        <button
+          data-testid={`grace-start-${mp.index}`}
+          onClick={() => onGrace(mp.index)}
+          className="w-full py-1.5 rounded text-xs bg-destructive/10 text-destructive hover:bg-destructive/20 flex items-center justify-center gap-1"
+        >
+          <Hourglass size={12} /> بدء مهلة الانتظار (10 دقائق)
+        </button>
+      )}
+      {state.active && (
+        <div className="bg-background border b-soft rounded-md p-2 space-y-1">
+          <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-white/40">
+            <span className="flex items-center gap-1 text-destructive">
+              <Hourglass size={10} /> مهلة الانتظار
+            </span>
+            <span className="text-gold-500 font-bold text-xs" data-testid={`timer-remaining-${mp.index}`}>
+              {state.paused ? "موقوف" : formatRemaining(remaining)}
+            </span>
+          </div>
+          <div className="text-[10px] text-white/50">
+            بدأها كلان {state.started_by} • {state.paused ? "هناك استراحة صلاة" : `تنتهي ${endsAt?.toLocaleTimeString("ar")}`}
+          </div>
+          {isOpponent && !state.paused && !opponentAlreadyPrayed && (
+            <button
+              data-testid={`prayer-start-${mp.index}`}
+              onClick={() => onPrayer(mp.index)}
+              className="w-full py-1 rounded text-xs bg-white/5 hover:bg-white/10 flex items-center justify-center gap-1"
+            >
+              <Pause size={11} /> استراحة صلاة (10 دقائق)
+            </button>
+          )}
+          {expired && isClaimer && (
+            <button
+              data-testid={`claim-win-${mp.index}`}
+              onClick={() => onClaim(mp.index)}
+              className="w-full py-1.5 rounded text-xs bg-gold-500 text-black font-bold hover:bg-gold-400 flex items-center justify-center gap-1"
+            >
+              <Trophy size={12} /> طالب بالفوز التلقائي
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function MapsBoard({ match, isLeaderA, isLeaderB, isAdmin, userSide, onVote, onResolve, onGrace, onPrayer, onClaim }) {
   return (
     <div className="grid sm:grid-cols-3 gap-3 mt-6">
       {match.maps.map((mp) => (
@@ -11,15 +85,19 @@ export default function MapsBoard({ match, isLeaderA, isLeaderB, isAdmin, onVote
           isLeaderA={isLeaderA}
           isLeaderB={isLeaderB}
           isAdmin={isAdmin}
+          userSide={userSide}
           onVote={onVote}
           onResolve={onResolve}
+          onGrace={onGrace}
+          onPrayer={onPrayer}
+          onClaim={onClaim}
         />
       ))}
     </div>
   );
 }
 
-function MapCard({ mp, match, isLeaderA, isLeaderB, isAdmin, onVote, onResolve }) {
+function MapCard({ mp, match, isLeaderA, isLeaderB, isAdmin, userSide, onVote, onResolve, onGrace, onPrayer, onClaim }) {
   const idx = mp.index;
   const myVote = isLeaderA ? mp.vote_a : isLeaderB ? mp.vote_b : null;
   const canVote = isLeaderA || isLeaderB;
@@ -35,12 +113,17 @@ function MapCard({ mp, match, isLeaderA, isLeaderB, isAdmin, onVote, onResolve }
       {mp.winner ? (
         <MapWinner mp={mp} match={match} />
       ) : (
-        <MapVoting
-          mp={mp} idx={idx} match={match}
-          canVote={canVote} isAdmin={isAdmin} myVote={myVote}
-          onVote={onVote} onResolve={onResolve}
-          showDisputeNote={showDisputeNote}
-        />
+        <>
+          <MapVoting
+            mp={mp} idx={idx} match={match}
+            canVote={canVote} isAdmin={isAdmin} myVote={myVote}
+            onVote={onVote} onResolve={onResolve}
+            showDisputeNote={showDisputeNote}
+          />
+          {match.status === "live" && (canVote || isAdmin) && (
+            <TimerBar mp={mp} userSide={userSide} onGrace={onGrace} onPrayer={onPrayer} onClaim={onClaim} />
+          )}
+        </>
       )}
     </div>
   );

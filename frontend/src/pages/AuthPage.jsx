@@ -10,6 +10,7 @@ export default function AuthPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
+  const [act, setAct] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const navigate = useNavigate();
@@ -22,7 +23,7 @@ export default function AuthPage() {
       if (tab === "login") {
         await login(email, password);
       } else {
-        await register({ email, password, username });
+        await register({ email, password, username, act });
       }
       toast.success("مرحباً بك في Arena");
       navigate("/");
@@ -101,6 +102,24 @@ export default function AuthPage() {
                   className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
                   placeholder="ProGamer"
                 />
+              </div>
+            )}
+            {tab === "register" && (
+              <div>
+                <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
+                  Activision ID (داخل اللعبة)
+                </label>
+                <input
+                  data-testid="input-act"
+                  value={act}
+                  onChange={(e) => setAct(e.target.value)}
+                  required
+                  minLength={2}
+                  maxLength={40}
+                  className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
+                  placeholder="YourName#1234"
+                />
+                <div className="text-[10px] text-white/40 mt-1">اسمك داخل لعبة Call of Duty (إلزامي)</div>
               </div>
             )}
             <div>

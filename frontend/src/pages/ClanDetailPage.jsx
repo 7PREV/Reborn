@@ -93,8 +93,45 @@ function ActionBar({ canJoin, isFull, isStaff, isMember, isLeader, onJoin, onCha
   );
 }
 
-function RequestsList({ requests, onAccept, onReject }) {
-  if (requests.length === 0) return null;
+function ChallengesList({ challenges, currentClanId, onAccept, onReject }) {
+  if (!challenges || challenges.length === 0) return null;
+  return (
+    <section>
+      <h2 className="font-display font-black text-2xl mb-4">تحديات المباريات ({challenges.length})</h2>
+      <div className="bg-surface border b-soft rounded-lg divide-y divide-white/5">
+        {challenges.map((c) => {
+          const incoming = c.opponent_clan_id === currentClanId;
+          return (
+            <div key={c.id} className="p-4 flex items-center gap-3 flex-wrap" data-testid={`challenge-${c.id}`}>
+              <div className="h-9 w-9 rounded-md bg-destructive/10 grid place-items-center text-destructive">
+                <Swords size={16} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="font-bold">
+                  {incoming ? `تحدٍ وارد من ${c.challenger_name}` : `بانتظار رد ${c.opponent_name}`}
+                </div>
+                <div className="text-[10px] uppercase tracking-widest text-white/40">
+                  [{incoming ? c.challenger_tag : c.opponent_tag}] • BO3 Call of Duty
+                </div>
+                {c.notes && <div className="text-xs text-white/50 mt-1">{c.notes}</div>}
+              </div>
+              {incoming ? (
+                <>
+                  <button data-testid={`ch-accept-${c.id}`} onClick={() => onAccept(c.id)} className="px-3 py-1.5 rounded bg-gold-500 text-black text-sm font-bold hover:bg-gold-400">قبول التحدي</button>
+                  <button data-testid={`ch-reject-${c.id}`} onClick={() => onReject(c.id)} className="px-3 py-1.5 rounded border b-soft text-sm hover:bg-white/5">رفض</button>
+                </>
+              ) : (
+                <span className="text-xs text-white/40">قيد الانتظار...</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function RequestsList({ requests, onAccept, onReject }) {  if (requests.length === 0) return null;
   return (
     <section>
       <h2 className="font-display font-black text-2xl mb-4">طلبات الانضمام ({requests.length})</h2>
@@ -123,6 +160,7 @@ export default function ClanDetailPage() {
   const [clan, setClan] = useState(null);
   const [requests, setRequests] = useState([]);
   const [allClans, setAllClans] = useState([]);
+  const [challenges, setChallenges] = useState([]);
   const [showChallenge, setShowChallenge] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteSearch, setInviteSearch] = useState("");
@@ -146,6 +184,12 @@ export default function ClanDetailPage() {
           setRequests(r.data);
         } catch {
           // 403 means not staff anymore; benign
+        }
+        try {
+          const ch = await api.get(`/clans/${id}/challenges`);
+          setChallenges(ch.data);
+        } catch {
+          // benign
         }
       }
     } catch (err) {
@@ -237,10 +281,26 @@ export default function ClanDetailPage() {
   const challenge = async (e) => {
     e.preventDefault();
     if (!opponent) return toast.error("اختر خصماً");
+    if (!user?.clan_id) return toast.error("يجب أن تكون في كلان لإرسال تحدٍ");
     try {
-      const { data } = await api.post("/matches", { clan_a_id: clan.id, clan_b_id: opponent });
-      toast.success("تم إنشاء التحدي");
-      window.location.href = `/matches/${data.id}`;
+      await api.post(`/clans/${user.clan_id}/challenge`, { opponent_clan_id: opponent });
+      toast.success("تم إرسال طلب التحدي. ينتظر قبول الخصم.");
+      setShowChallenge(false);
+      setOpponent("");
+      load();
+    } catch (err) { handleErr(err); }
+  };
+
+  const respondChallenge = async (chId, action) => {
+    try {
+      const { data } = await api.post(`/challenges/${chId}`, { action });
+      if (action === "accept" && data?.match?.id) {
+        toast.success("تم قبول التحدي. بدأت المباراة!");
+        window.location.href = `/matches/${data.match.id}`;
+      } else {
+        toast.success(action === "accept" ? "تم القبول" : "تم رفض التحدي");
+        load();
+      }
     } catch (err) { handleErr(err); }
   };
 
@@ -298,6 +358,14 @@ export default function ClanDetailPage() {
       </section>
 
       {flags.isStaff && <RequestsList requests={requests} onAccept={accept} onReject={reject} />}
+      {flags.isStaff && (
+        <ChallengesList
+          challenges={challenges}
+          currentClanId={clan.id}
+          onAccept={(cid) => respondChallenge(cid, "accept")}
+          onReject={(cid) => respondChallenge(cid, "reject")}
+        />
+      )}
 
       {showChallenge && (
         <ChallengeModal

@@ -33,18 +33,28 @@ function ImageMediaBlock({ m, showOpponentButtons, onOpponentDecide }) {
 }
 
 function VideoMediaBlock({ m, isAdmin, onAdminDecide }) {
+  const isReject = m.admin_decision === "reject";
+  const isApprove = m.admin_decision === "approve";
   return (
     <div>
       <video src={m.video} controls className="rounded-md mb-2 max-w-full max-h-72" />
       {m.admin_decision && (
-        <div className={`text-xs mb-2 inline-flex items-center gap-1 px-2 py-1 rounded ${
-          m.admin_decision === "approve" ? "bg-emerald-500/10 text-emerald-400" : "bg-destructive/10 text-destructive"
-        }`}>
-          {m.admin_decision === "approve" ? <CheckCircle size={12} /> : <XCircle size={12} />}
-          <span>قرار المنظم: {m.admin_decision === "approve" ? "موافقة" : "رفض"}</span>
+        <div
+          data-testid={`video-decision-${m.id}`}
+          className={`text-xs mb-2 flex items-start gap-2 px-2 py-1.5 rounded ${
+            isApprove ? "bg-emerald-500/10 text-emerald-400" : "bg-destructive/10 text-destructive"
+          }`}
+        >
+          {isApprove ? <CheckCircle size={14} className="mt-0.5 shrink-0" /> : <XCircle size={14} className="mt-0.5 shrink-0" />}
+          <div className="flex-1">
+            <div className="font-bold">قرار المنظم: {isApprove ? "موافقة" : "رفض"}</div>
+            {isReject && m.admin_note && (
+              <div className="text-white/70 mt-0.5 whitespace-pre-wrap">{m.admin_note}</div>
+            )}
+          </div>
         </div>
       )}
-      {m.admin_note && (
+      {!isReject && m.admin_note && (
         <div className="text-xs text-white/60 bg-white/5 rounded p-2 mb-2 flex items-start gap-1">
           <Edit3 size={12} className="mt-0.5 text-gold-500" />
           <span>{m.admin_note}</span>

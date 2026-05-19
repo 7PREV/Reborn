@@ -280,6 +280,30 @@ export default function MatchDetailPage() {
     } catch (err) { handleErr(err); }
   };
 
+  const startGrace = async (idx) => {
+    try {
+      await api.post(`/matches/${id}/maps/${idx}/grace`);
+      toast.success("بدأت مهلة 10 دقائق");
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
+  const startPrayer = async (idx) => {
+    try {
+      await api.post(`/matches/${id}/maps/${idx}/prayer`);
+      toast.success("استراحة صلاة بدأت — المهلة موقوفة");
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
+  const claimGraceWin = async (idx) => {
+    try {
+      await api.post(`/matches/${id}/maps/${idx}/claim-grace-win`);
+      toast.success("تم احتساب الفوز بالماب");
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
   const withdraw = async () => {
     // eslint-disable-next-line no-alert
     if (!confirm("هل أنت متأكد؟ سيتم خصم 3 نقاط من كلانك وفوز الخصم.")) return;
@@ -302,7 +326,14 @@ export default function MatchDetailPage() {
   const adminDecide = async (msgId, decision) => {
     let note = "";
     let finalDecision = decision;
-    if (decision === "note") {
+    if (decision === "reject") {
+      // eslint-disable-next-line no-alert
+      note = prompt("سبب الرفض (سيظهر تحت الفيديو):") || "";
+      if (!note.trim()) {
+        toast.error("يجب كتابة سبب الرفض");
+        return;
+      }
+    } else if (decision === "note") {
       // eslint-disable-next-line no-alert
       note = prompt("اكتب ملاحظتك:") || "";
       if (!note) return;
@@ -329,8 +360,12 @@ export default function MatchDetailPage() {
           isLeaderA={isLeaderA}
           isLeaderB={isLeaderB}
           isAdmin={isAdminFlag}
+          userSide={isLeaderA ? "A" : isLeaderB ? "B" : null}
           onVote={vote}
           onResolve={resolve}
+          onGrace={startGrace}
+          onPrayer={startPrayer}
+          onClaim={claimGraceWin}
         />
         {match.status === "finished" && match.winner_clan_id && (
           <div className="mt-6 text-center py-3 bg-gold-500/10 border border-gold-500/30 rounded-lg">

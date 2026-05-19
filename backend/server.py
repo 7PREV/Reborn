@@ -109,6 +109,37 @@ def sanitize_user(u: dict) -> dict:
     }
 
 
+CLAN_LEAVE_COOLDOWN_HOURS = 2
+
+
+def _cooldown_remaining_seconds(user: dict) -> int:
+    """Returns seconds remaining on the user's clan-join cooldown, 0 if none."""
+    iso_until = user.get("clan_cooldown_until")
+    if not iso_until:
+        return 0
+    try:
+        dt = datetime.fromisoformat(iso_until)
+    except Exception:
+        return 0
+    delta = (dt - now_utc()).total_seconds()
+    return max(0, int(delta))
+
+
+def _assert_no_cooldown(user: dict) -> None:
+    remaining = _cooldown_remaining_seconds(user)
+    if remaining > 0:
+        mins = (remaining + 59) // 60
+        raise HTTPException(400, f"لا يمكنك الانضمام لكلان الآن. المتبقي {mins} دقيقة")
+
+
+async def _start_clan_leave_cooldown(user_id: str) -> None:
+    until = iso(now_utc() + timedelta(hours=CLAN_LEAVE_COOLDOWN_HOURS))
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"clan_id": None, "clan_cooldown_until": until}},
+    )
+
+
 async def _maybe_grant_full_clan_reward(clan_id: str) -> bool:
     """When a clan first reaches 7 members, grant the leader 7-day Plus.
     Returns True if reward was just granted."""
@@ -197,6 +228,11 @@ class HandleRequestIn(BaseModel):
 class MatchCreateIn(BaseModel):
     clan_a_id: str
     clan_b_id: str
+    notes: Optional[str] = ""
+
+
+class ChallengeIn(BaseModel):
+    opponent_clan_id: str
     notes: Optional[str] = ""
 
 
@@ -523,6 +559,7 @@ async def delete_clan(clan_id: str, user: dict = Depends(get_current_user)):
 async def request_join(clan_id: str, user: dict = Depends(get_current_user)):
     if user.get("clan_id"):
         raise HTTPException(400, "أنت بالفعل في كلان")
+    _assert_no_cooldown(user)
     clan = await _get_clan(clan_id)
     max_members, _ = await _leader_limits(clan)
     if len(clan.get("member_ids", [])) >= max_members:
@@ -567,7 +604,11 @@ async def handle_request(clan_id: str, req_id: str, body: HandleRequestIn, user:
             raise HTTPException(400, f"الكلان ممتلئ (الحد {max_members})")
         target = await db.users.find_one({"id": req["user_id"]})
         if target and not target.get("clan_id"):
-            await db.users.update_one({"id": req["user_id"]}, {"$set": {"clan_id": clan_id}})
+            _assert_no_cooldown(target)
+            await db.users.update_one(
+                {"id": req["user_id"]},
+                {"$set": {"clan_id": clan_id, "clan_cooldown_until": None}},
+            )
             await db.clans.update_one({"id": clan_id}, {"$addToSet": {"member_ids": req["user_id"]}})
             granted = await _maybe_grant_full_clan_reward(clan_id)
     await db.join_requests.update_one({"id": req_id}, {"$set": {"status": body.action}})
@@ -620,11 +661,15 @@ async def respond_invite(inv_id: str, body: HandleRequestIn, user: dict = Depend
     if not inv:
         raise HTTPException(404, "الدعوة غير موجودة")
     if body.action == "accept" and not user.get("clan_id"):
+        _assert_no_cooldown(user)
         clan = await _get_clan(inv["clan_id"])
         max_members, _ = await _leader_limits(clan)
         if len(clan.get("member_ids", [])) >= max_members:
             raise HTTPException(400, "الكلان ممتلئ")
-        await db.users.update_one({"id": user["id"]}, {"$set": {"clan_id": inv["clan_id"]}})
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"clan_id": inv["clan_id"], "clan_cooldown_until": None}},
+        )
         await db.clans.update_one({"id": inv["clan_id"]}, {"$addToSet": {"member_ids": user["id"]}})
         granted = await _maybe_grant_full_clan_reward(inv["clan_id"])
     await db.join_requests.update_one({"id": inv_id}, {"$set": {"status": body.action}})
@@ -641,7 +686,7 @@ async def kick_member(clan_id: str, member_id: str, user: dict = Depends(get_cur
     await db.clans.update_one({"id": clan_id}, {
         "$pull": {"member_ids": member_id, "vice_leader_ids": member_id}
     })
-    await db.users.update_one({"id": member_id}, {"$set": {"clan_id": None}})
+    await _start_clan_leave_cooldown(member_id)
     return {"ok": True}
 
 
@@ -671,8 +716,107 @@ async def leave_clan(clan_id: str, user: dict = Depends(get_current_user)):
     await db.clans.update_one({"id": clan_id}, {
         "$pull": {"member_ids": user["id"], "vice_leader_ids": user["id"]}
     })
-    await db.users.update_one({"id": user["id"]}, {"$set": {"clan_id": None}})
-    return {"ok": True}
+    await _start_clan_leave_cooldown(user["id"])
+    return {"ok": True, "cooldown_hours": CLAN_LEAVE_COOLDOWN_HOURS}
+
+
+# ---------------- CLAN CHALLENGES (request → accept → match) ----------------
+@api.post("/clans/{clan_id}/challenge")
+async def create_challenge(clan_id: str, body: ChallengeIn, user: dict = Depends(get_current_user)):
+    """Leader/Vice of *user's* clan issues a challenge request to another clan.
+    `clan_id` in the URL is the challenger's own clan id (must match user.clan_id)."""
+    challenger = await _get_clan(clan_id)
+    if not _is_clan_staff(challenger, user):
+        raise HTTPException(403, "فقط قائد أو نائب الكلان")
+    if user.get("clan_id") != clan_id and not is_staff(user):
+        raise HTTPException(403, "هذا ليس كلانك")
+    if body.opponent_clan_id == clan_id:
+        raise HTTPException(400, "لا يمكن تحدي نفس الكلان")
+    opponent = await _get_clan(body.opponent_clan_id)
+    existing = await db.challenges.find_one({
+        "status": "pending",
+        "$or": [
+            {"challenger_clan_id": clan_id, "opponent_clan_id": opponent["id"]},
+            {"challenger_clan_id": opponent["id"], "opponent_clan_id": clan_id},
+        ],
+    })
+    if existing:
+        raise HTTPException(400, "هناك طلب تحدٍ معلّق بالفعل بين الكلانين")
+    ch = {
+        "id": str(uuid.uuid4()),
+        "challenger_clan_id": clan_id,
+        "challenger_name": challenger["name"],
+        "challenger_tag": challenger["tag"],
+        "opponent_clan_id": opponent["id"],
+        "opponent_name": opponent["name"],
+        "opponent_tag": opponent["tag"],
+        "notes": body.notes or "",
+        "status": "pending",
+        "created_by": user["id"],
+        "created_at": iso(now_utc()),
+        "match_id": None,
+    }
+    await db.challenges.insert_one(ch)
+    ch.pop("_id", None)
+    return ch
+
+
+@api.get("/clans/{clan_id}/challenges")
+async def list_clan_challenges(clan_id: str, user: dict = Depends(get_current_user)):
+    """Pending challenges involving this clan (incoming + outgoing)."""
+    clan = await _get_clan(clan_id)
+    if not _is_clan_staff(clan, user):
+        raise HTTPException(403, "فقط قائد/نائب الكلان أو المنظم")
+    docs = await db.challenges.find({
+        "status": "pending",
+        "$or": [{"challenger_clan_id": clan_id}, {"opponent_clan_id": clan_id}],
+    }, {"_id": 0}).sort("created_at", -1).to_list(50)
+    return docs
+
+
+@api.post("/challenges/{ch_id}")
+async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depends(get_current_user)):
+    """Opponent leader/vice accepts (→ creates live match) or rejects the challenge."""
+    ch = await db.challenges.find_one({"id": ch_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(404, "التحدي غير موجود")
+    if ch["status"] != "pending":
+        raise HTTPException(400, "تم الرد على هذا التحدي مسبقاً")
+    opponent = await _get_clan(ch["opponent_clan_id"])
+    if not _is_clan_staff(opponent, user):
+        raise HTTPException(403, "فقط قائد/نائب الكلان الخصم يمكنه الرد")
+    if body.action == "reject":
+        await db.challenges.update_one({"id": ch_id}, {"$set": {"status": "rejected"}})
+        return {"ok": True, "status": "rejected"}
+    # Accept → create live match
+    maps = [
+        {"index": i, "vote_a": None, "vote_b": None, "winner": None,
+         "disputed": False, "admin_resolved": False,
+         "grace_started_at": None, "grace_started_by_clan": None,
+         "prayer_started_at": None, "prayer_started_by_clan": None,
+         "prayer_used_by_clan": []}
+        for i in range(BO_TOTAL)
+    ]
+    m = {
+        "id": str(uuid.uuid4()),
+        "clan_a_id": ch["challenger_clan_id"],
+        "clan_b_id": ch["opponent_clan_id"],
+        "game": "Call of Duty",
+        "status": "live",
+        "maps": maps,
+        "score_a": 0,
+        "score_b": 0,
+        "winner_clan_id": None,
+        "notes": ch.get("notes", ""),
+        "created_at": iso(now_utc()),
+        "finished_at": None,
+    }
+    await db.matches.insert_one(m)
+    await db.challenges.update_one(
+        {"id": ch_id}, {"$set": {"status": "accepted", "match_id": m["id"]}}
+    )
+    m.pop("_id", None)
+    return {"ok": True, "status": "accepted", "match": await _enrich_match(m)}
 
 
 # ---------------- MATCHES ----------------
@@ -681,6 +825,9 @@ async def _enrich_match(m: dict) -> dict:
     b = await db.clans.find_one({"id": m["clan_b_id"]}, {"_id": 0, "name": 1, "tag": 1, "id": 1})
     m["clan_a"] = a
     m["clan_b"] = b
+    # Attach derived timer state for each map (consumed by frontend countdown UI)
+    for mp in m.get("maps", []):
+        mp["grace_state"] = _compute_grace_state(mp)
     return m
 
 
@@ -694,6 +841,9 @@ def _count_maps(maps: list) -> tuple[int, int]:
 POINTS_WIN = 3
 POINTS_LOSS = -1
 POINTS_WITHDRAW = -3
+
+GRACE_PERIOD_SECONDS = 10 * 60  # 10-minute grace period to claim a map win
+PRAYER_BREAK_SECONDS = 10 * 60  # 10-minute prayer break that pauses the grace timer
 
 # Video upload limits
 PLUS_VIDEO_MAX_BYTES = 500 * 1024 * 1024     # 500 MB
@@ -738,7 +888,11 @@ async def create_match(body: MatchCreateIn, user: dict = Depends(get_current_use
     if not is_staff(user) and user["id"] not in (a["leader_id"], b["leader_id"]):
         raise HTTPException(403, "فقط المنظم أو قادة الكلانات")
     maps = [
-        {"index": i, "vote_a": None, "vote_b": None, "winner": None, "disputed": False, "admin_resolved": False}
+        {"index": i, "vote_a": None, "vote_b": None, "winner": None,
+         "disputed": False, "admin_resolved": False,
+         "grace_started_at": None, "grace_started_by_clan": None,
+         "prayer_started_at": None, "prayer_started_by_clan": None,
+         "prayer_used_by_clan": []}
         for i in range(BO_TOTAL)
     ]
     m = {
@@ -930,6 +1084,157 @@ async def withdraw_match(match_id: str, user: dict = Depends(get_current_user)):
         if fresh_match:
             await _advance_tournament_winner(fresh_match, winning_clan)
     return {"ok": True, "withdrawn_clan_id": withdrawing_clan, "winning_clan_id": winning_clan}
+
+
+# ---------------- MAP TIMERS (Grace period + Prayer break) ----------------
+def _user_side(user: dict, a: dict, b: dict) -> Optional[str]:
+    """Returns 'A', 'B', or None depending on which clan's staff this user belongs to."""
+    staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
+    staff_b = [b["leader_id"]] + b.get("vice_leader_ids", [])
+    if user["id"] in staff_a:
+        return "A"
+    if user["id"] in staff_b:
+        return "B"
+    return None
+
+
+def _other(side: str) -> str:
+    return "B" if side == "A" else "A"
+
+
+def _compute_grace_state(mp: dict) -> dict:
+    """Pure helper returning derived timing info for a map."""
+    g_at = mp.get("grace_started_at")
+    if not g_at:
+        return {"active": False, "ends_at": None, "paused": False, "started_by": None}
+    try:
+        start = datetime.fromisoformat(g_at)
+    except Exception:
+        return {"active": False, "ends_at": None, "paused": False, "started_by": None}
+    used = len(mp.get("prayer_used_by_clan", []))
+    ends_at = start + timedelta(seconds=GRACE_PERIOD_SECONDS + used * PRAYER_BREAK_SECONDS)
+    # If a prayer is currently active, freeze countdown (extend ends_at proportionally)
+    p_at = mp.get("prayer_started_at")
+    paused = False
+    if p_at:
+        try:
+            p_start = datetime.fromisoformat(p_at)
+            if (now_utc() - p_start).total_seconds() < PRAYER_BREAK_SECONDS:
+                paused = True
+        except Exception:
+            pass
+    return {
+        "active": True,
+        "ends_at": iso(ends_at),
+        "paused": paused,
+        "started_by": mp.get("grace_started_by_clan"),
+    }
+
+
+@api.post("/matches/{match_id}/maps/{map_index}/grace")
+async def start_grace(match_id: str, map_index: int, user: dict = Depends(get_current_user)):
+    """Caller's clan claims that the opponent has gone AFK on this map.
+    Starts a 10-min countdown. If opponent doesn't vote in time, claimer can claim the win."""
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    if match["status"] != "live":
+        raise HTTPException(400, "المباراة منتهية")
+    if not (0 <= map_index < BO_TOTAL):
+        raise HTTPException(400, "رقم ماب غير صحيح")
+    mp = match["maps"][map_index]
+    if mp.get("winner") or mp.get("admin_resolved"):
+        raise HTTPException(400, "هذا الماب محسوم")
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    side = _user_side(user, a, b)
+    if not side:
+        raise HTTPException(403, "فقط القائد أو النواب")
+    if mp.get("grace_started_at"):
+        raise HTTPException(400, "المهلة بدأت بالفعل")
+    mp["grace_started_at"] = iso(now_utc())
+    mp["grace_started_by_clan"] = side
+    match["maps"][map_index] = mp
+    await db.matches.update_one({"id": match_id}, {"$set": {"maps": match["maps"]}})
+    fresh = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    return await _enrich_match(fresh)
+
+
+@api.post("/matches/{match_id}/maps/{map_index}/prayer")
+async def start_prayer(match_id: str, map_index: int, user: dict = Depends(get_current_user)):
+    """The clan being claimed against starts a one-time 10-min prayer break that pauses the grace."""
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    if match["status"] != "live":
+        raise HTTPException(400, "المباراة منتهية")
+    if not (0 <= map_index < BO_TOTAL):
+        raise HTTPException(400, "رقم ماب غير صحيح")
+    mp = match["maps"][map_index]
+    if mp.get("winner") or mp.get("admin_resolved"):
+        raise HTTPException(400, "هذا الماب محسوم")
+    if not mp.get("grace_started_at"):
+        raise HTTPException(400, "لا توجد مهلة جارية")
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    side = _user_side(user, a, b)
+    if not side:
+        raise HTTPException(403, "فقط القائد أو النواب")
+    used = mp.get("prayer_used_by_clan", [])
+    if side in used:
+        raise HTTPException(400, "استخدمت استراحة الصلاة مسبقاً في هذا الماب")
+    # Check if a prayer is currently active
+    p_at = mp.get("prayer_started_at")
+    if p_at:
+        try:
+            p_start = datetime.fromisoformat(p_at)
+            if (now_utc() - p_start).total_seconds() < PRAYER_BREAK_SECONDS:
+                raise HTTPException(400, "هناك استراحة صلاة جارية")
+        except Exception:
+            pass
+    mp["prayer_started_at"] = iso(now_utc())
+    mp["prayer_started_by_clan"] = side
+    mp["prayer_used_by_clan"] = used + [side]
+    match["maps"][map_index] = mp
+    await db.matches.update_one({"id": match_id}, {"$set": {"maps": match["maps"]}})
+    fresh = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    return await _enrich_match(fresh)
+
+
+@api.post("/matches/{match_id}/maps/{map_index}/claim-grace-win")
+async def claim_grace_win(match_id: str, map_index: int, user: dict = Depends(get_current_user)):
+    """After grace period expires, the claimer's clan auto-wins this map."""
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    if match["status"] != "live":
+        raise HTTPException(400, "المباراة منتهية")
+    if not (0 <= map_index < BO_TOTAL):
+        raise HTTPException(400, "رقم ماب غير صحيح")
+    mp = match["maps"][map_index]
+    if mp.get("winner") or mp.get("admin_resolved"):
+        raise HTTPException(400, "هذا الماب محسوم")
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    side = _user_side(user, a, b)
+    if not side:
+        raise HTTPException(403, "فقط القائد أو النواب")
+    if mp.get("grace_started_by_clan") != side:
+        raise HTTPException(403, "فقط الكلان الذي بدأ المهلة يمكنه المطالبة بالفوز")
+    state = _compute_grace_state(mp)
+    if state["paused"]:
+        raise HTTPException(400, "استراحة صلاة جارية")
+    if not state["ends_at"]:
+        raise HTTPException(400, "لم تبدأ المهلة")
+    if datetime.fromisoformat(state["ends_at"]) > now_utc():
+        raise HTTPException(400, "لم تنته المهلة بعد")
+    mp["winner"] = side
+    mp["admin_resolved"] = False
+    match["maps"][map_index] = mp
+    await db.matches.update_one({"id": match_id}, {"$set": {"maps": match["maps"]}})
+    await _maybe_finish(match)
+    fresh = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    return await _enrich_match(fresh)
 
 
 # ---------------- CHAT ----------------
@@ -1213,7 +1518,10 @@ async def _create_round_matches(tournament: dict, round_index: int) -> None:
             continue
         maps = [
             {"index": i, "vote_a": None, "vote_b": None, "winner": None,
-             "disputed": False, "admin_resolved": False}
+             "disputed": False, "admin_resolved": False,
+             "grace_started_at": None, "grace_started_by_clan": None,
+             "prayer_started_at": None, "prayer_started_by_clan": None,
+             "prayer_used_by_clan": []}
             for i in range(BO_TOTAL)
         ]
         m = {

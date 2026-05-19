@@ -55,6 +55,12 @@ export default function ProfilePage() {
           </div>
           <h1 className="font-display font-black text-3xl">{user.username}</h1>
           <div className="text-white/50 text-sm">{user.email}</div>
+          {user.act && (
+            <div className="mt-2 inline-flex items-center gap-1 text-xs bg-white/5 border b-soft rounded px-2 py-1" data-testid="profile-act">
+              <span className="text-white/40">Activision ID:</span>
+              <span className="text-gold-400 font-bold">{user.act}</span>
+            </div>
+          )}
         </div>
         <div className="text-center">
           <div className="text-3xl font-display font-black text-gold-500 flex items-center gap-1">
@@ -87,6 +93,18 @@ export default function ProfilePage() {
           {user.is_plus ? "إلغاء Plus" : "تفعيل Plus (مجاناً للتجربة)"}
         </button>
       </div>
+
+      {user.clan_cooldown_until && new Date(user.clan_cooldown_until) > new Date() && (
+        <div data-testid="cooldown-banner" className="bg-destructive/10 border border-destructive/30 rounded-xl p-5 flex items-center gap-3">
+          <X className="text-destructive" />
+          <div className="flex-1">
+            <div className="font-bold text-destructive">في فترة انتظار</div>
+            <div className="text-xs text-white/60 mt-1">
+              لا يمكنك الانضمام لكلان جديد قبل: {new Date(user.clan_cooldown_until).toLocaleString("ar")}
+            </div>
+          </div>
+        </div>
+      )}
 
       {user.clan_id && (
         <div className="bg-surface border b-soft rounded-xl p-5 flex items-center gap-3">

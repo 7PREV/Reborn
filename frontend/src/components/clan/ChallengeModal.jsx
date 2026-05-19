@@ -15,10 +15,10 @@ export default function ChallengeModal({ clan, allClans, opponent, onOpponentCha
             <option key={c.id} value={c.id}>{c.name} [{c.tag}]</option>
           ))}
         </select>
-        <p className="text-xs text-white/50">المباراة تتكون من 3 خرائط، أول كلان يفوز بخريطتين يربح المباراة.</p>
+        <p className="text-xs text-white/50">سيتم إرسال طلب تحدٍ. تبدأ المباراة فقط بعد قبول قائد الكلان الخصم.</p>
         <div className="flex gap-2 justify-end">
           <button type="button" onClick={onClose} className="px-4 py-2 rounded-md hover:bg-white/5">إلغاء</button>
-          <button data-testid="submit-challenge" type="submit" className="px-5 py-2 rounded-md bg-destructive text-white font-bold hover:bg-destructive/90">إطلاق التحدي</button>
+          <button data-testid="submit-challenge" type="submit" className="px-5 py-2 rounded-md bg-destructive text-white font-bold hover:bg-destructive/90">إرسال طلب التحدي</button>
         </div>
       </form>
     </div>
