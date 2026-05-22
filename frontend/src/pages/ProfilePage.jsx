@@ -2,14 +2,31 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { Shield, Trophy, Mail, Check, X, Sparkles, Tv, Save } from "lucide-react";
+import { Shield, Trophy, Mail, Check, X, Sparkles, Tv, Save, RefreshCw, Lock } from "lucide-react";
 import { toast } from "sonner";
+
+const ACT_COOLDOWN_DAYS = 14;
+
+function formatActCooldown(changedAt) {
+  if (!changedAt) return null;
+  try {
+    const next = new Date(new Date(changedAt).getTime() + ACT_COOLDOWN_DAYS * 86400000);
+    const diff = next - new Date();
+    if (diff <= 0) return null;
+    const days = Math.floor(diff / 86400000);
+    const hrs = Math.floor((diff % 86400000) / 3600000);
+    return `${days} يوم و${hrs} ساعة`;
+  } catch {
+    return null;
+  }
+}
 
 export default function ProfilePage() {
   const { user, refresh } = useAuth();
   const [invites, setInvites] = useState([]);
   const [streamForm, setStreamForm] = useState({ twitch_url: "", kick_url: "", tiktok_url: "", act: "" });
   const [savingStreams, setSavingStreams] = useState(false);
+  const [archivedClan, setArchivedClan] = useState(null);
 
   const load = async () => {
     const { data } = await api.get("/me/invites");
@@ -24,6 +41,7 @@ export default function ProfilePage() {
         tiktok_url: user.tiktok_url || "",
         act: user.act || "",
       });
+      api.get("/me/archived-clan").then((r) => setArchivedClan(r.data)).catch(() => setArchivedClan(null));
     }
   }, [user]);
 
@@ -38,6 +56,20 @@ export default function ProfilePage() {
       toast.error(formatApiErrorDetail(err.response?.data?.detail));
     } finally {
       setSavingStreams(false);
+    }
+  };
+
+  const restoreClan = async () => {
+    if (!archivedClan) return;
+    // eslint-disable-next-line no-alert
+    if (!confirm(`استعادة كلان "${archivedClan.name}" من الأرشيف؟`)) return;
+    try {
+      await api.post(`/clans/${archivedClan.id}/restore`);
+      toast.success("تم استعادة الكلان بنجاح");
+      await refresh();
+      setArchivedClan(null);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
     }
   };
 
@@ -126,16 +158,27 @@ export default function ProfilePage() {
         </h2>
         <form onSubmit={saveStreams} className="space-y-3">
           <div>
-            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">Activision ID</label>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block flex items-center gap-1">
+              Activision ID
+              {formatActCooldown(user.act_changed_at) && <Lock size={12} className="text-destructive" />}
+            </label>
             <input
               data-testid="profile-act-input"
               value={streamForm.act}
               onChange={(e) => setStreamForm({ ...streamForm, act: e.target.value })}
               minLength={2}
               maxLength={40}
+              disabled={!!formatActCooldown(user.act_changed_at)}
               placeholder="YourName#1234"
-              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
+              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             />
+            {formatActCooldown(user.act_changed_at) ? (
+              <div data-testid="act-cooldown-msg" className="text-[11px] text-destructive mt-1">
+                لا يمكنك تغيير الـ Activision ID إلا مرة كل أسبوعين. المتبقي: {formatActCooldown(user.act_changed_at)}
+              </div>
+            ) : (
+              <div className="text-[10px] text-white/40 mt-1">⚠️ بعد التغيير يصبح مغلقًا لمدة 14 يومًا.</div>
+            )}
           </div>
           <div>
             <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">Twitch URL</label>
@@ -178,6 +221,23 @@ export default function ProfilePage() {
           </button>
         </form>
       </section>
+
+      {archivedClan && !user.clan_id && (
+        <div data-testid="restore-clan-card" className="bg-gold-500/5 border border-gold-500/30 rounded-xl p-5 flex items-center gap-3 flex-wrap">
+          <Shield className="text-gold-500" />
+          <div className="flex-1 min-w-0">
+            <div className="font-display font-bold">كلانك في الأرشيف: {archivedClan.name}</div>
+            <div className="text-xs text-white/50 mt-0.5">[{archivedClan.tag}] • مؤرشف منذ {new Date(archivedClan.archived_at).toLocaleDateString("ar")}</div>
+          </div>
+          <button
+            data-testid="restore-clan-btn"
+            onClick={restoreClan}
+            className="px-4 py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 flex items-center gap-2"
+          >
+            <RefreshCw size={14} /> استعادة الكلان من الأرشفة
+          </button>
+        </div>
+      )}
 
       {user.clan_cooldown_until && new Date(user.clan_cooldown_until) > new Date() && (
         <div data-testid="cooldown-banner" className="bg-destructive/10 border border-destructive/30 rounded-xl p-5 flex items-center gap-3">

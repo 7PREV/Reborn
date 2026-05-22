@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { AlertOctagon, Plus, Trash2, ShieldOff, Image as ImageIcon } from "lucide-react";
+import { Plus, Trash2, ShieldOff, Image as ImageIcon } from "lucide-react";
 import { toast } from "sonner";
 
 const PROOF_MAX = 3_000_000;
@@ -166,9 +166,14 @@ export default function BlacklistPage() {
 
   if (!user || (user.role !== "admin" && user.role !== "owner")) {
     return (
-      <div className="bg-surface border b-soft rounded-xl p-12 text-center" data-testid="blacklist-denied">
-        <AlertOctagon size={32} className="mx-auto mb-3 text-destructive" />
-        صفحة القائمة السوداء للمنظمين والمالك فقط
+      <div className="space-y-6">
+        <div>
+          <h1 className="font-display font-black text-3xl md:text-4xl flex items-center gap-3">
+            <ShieldOff className="text-destructive" /> القائمة السوداء
+          </h1>
+          <p className="text-white/50 mt-1">سجل علني للاعبين الغشاشين الذين تم رصدهم. الإضافة والحذف للمنظمين فقط.</p>
+        </div>
+        <PublicList items={items} />
       </div>
     );
   }
@@ -179,7 +184,7 @@ export default function BlacklistPage() {
         <h1 className="font-display font-black text-3xl md:text-4xl flex items-center gap-3">
           <ShieldOff className="text-destructive" /> القائمة السوداء
         </h1>
-        <p className="text-white/50 mt-1">سجل اللاعبين الغشاشين مع إثباتات. تظهر هذه الصفحة فقط للمنظمين والمالك.</p>
+        <p className="text-white/50 mt-1">سجل اللاعبين الغشاشين مع إثباتات. الإضافة والحذف للمنظمين والمالك فقط.</p>
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">
@@ -187,61 +192,78 @@ export default function BlacklistPage() {
 
         <section>
           <h2 className="font-display font-black text-xl mb-3">السجلات ({items.length})</h2>
-          <div className="space-y-3 max-h-[700px] overflow-y-auto pl-1">
-            {items.length === 0 && (
-              <div className="bg-surface border b-soft rounded-lg p-8 text-center text-white/40 text-sm">
-                لا توجد سجلات بعد
-              </div>
-            )}
-            {items.map((b) => (
-              <article
-                key={b.id}
-                data-testid={`blacklist-item-${b.id}`}
-                className="bg-surface border border-destructive/20 rounded-lg p-4 space-y-2"
-              >
-                <div className="flex items-start justify-between gap-2 flex-wrap">
-                  <div>
-                    <div className="text-xs uppercase tracking-widest text-destructive">غشاش</div>
-                    <div className="font-display font-black text-lg">{b.player_name}</div>
-                    {b.player_account?.email && (
-                      <div className="text-xs text-white/50">{b.player_account.email}</div>
-                    )}
-                  </div>
-                  <button
-                    data-testid={`bl-delete-${b.id}`}
-                    onClick={() => remove(b.id)}
-                    className="p-2 rounded text-destructive hover:bg-destructive/10"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-                <div className="text-sm">
-                  <span className="text-white/40">أداة الغش: </span>
-                  <span className="font-bold text-destructive">{b.cheat_tool}</span>
-                </div>
-                {b.player_account && (
-                  <div className="text-xs text-white/60 bg-background border b-soft rounded p-2">
-                    <div><span className="text-white/40">المعرف: </span>{b.player_account.id}</div>
-                    {b.player_account.act && <div><span className="text-white/40">Activision: </span>{b.player_account.act}</div>}
-                    {b.player_account.clan_id && <div><span className="text-white/40">الكلان: </span>{b.player_account.clan_id}</div>}
-                    <div><span className="text-white/40">النقاط: </span>{b.player_account.points || 0}</div>
-                  </div>
-                )}
-                {b.details && (
-                  <div className="text-sm text-white/70 whitespace-pre-wrap">{b.details}</div>
-                )}
-                {b.proof_image && (
-                  <img src={b.proof_image} alt="proof" className="rounded max-h-72 border b-soft" />
-                )}
-                <div className="text-[10px] text-white/30 flex justify-between">
-                  <span>أضيف بواسطة: {b.added_by_username}</span>
-                  <span>{new Date(b.created_at).toLocaleString("ar")}</span>
-                </div>
-              </article>
-            ))}
-          </div>
+          <BlacklistEntries items={items} canRemove onRemove={remove} />
         </section>
       </div>
+    </div>
+  );
+}
+
+function PublicList({ items }) {
+  return (
+    <section>
+      <h2 className="font-display font-black text-xl mb-3">السجلات ({items.length})</h2>
+      <BlacklistEntries items={items} canRemove={false} />
+    </section>
+  );
+}
+
+function BlacklistEntries({ items, canRemove, onRemove }) {
+  return (
+    <div className="space-y-3 max-h-[700px] overflow-y-auto pl-1">
+      {items.length === 0 && (
+        <div className="bg-surface border b-soft rounded-lg p-8 text-center text-white/40 text-sm">
+          لا توجد سجلات بعد
+        </div>
+      )}
+      {items.map((b) => (
+        <article
+          key={b.id}
+          data-testid={`blacklist-item-${b.id}`}
+          className="bg-surface border border-destructive/20 rounded-lg p-4 space-y-2"
+        >
+          <div className="flex items-start justify-between gap-2 flex-wrap">
+            <div>
+              <div className="text-xs uppercase tracking-widest text-destructive">غشاش</div>
+              <div className="font-display font-black text-lg">{b.player_name}</div>
+              {b.player_account?.email && (
+                <div className="text-xs text-white/50">{b.player_account.email}</div>
+              )}
+            </div>
+            {canRemove && (
+              <button
+                data-testid={`bl-delete-${b.id}`}
+                onClick={() => onRemove(b.id)}
+                className="p-2 rounded text-destructive hover:bg-destructive/10"
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
+          </div>
+          <div className="text-sm">
+            <span className="text-white/40">أداة الغش: </span>
+            <span className="font-bold text-destructive">{b.cheat_tool}</span>
+          </div>
+          {b.player_account && (
+            <div className="text-xs text-white/60 bg-background border b-soft rounded p-2">
+              <div><span className="text-white/40">المعرف: </span>{b.player_account.id}</div>
+              {b.player_account.act && <div><span className="text-white/40">Activision: </span>{b.player_account.act}</div>}
+              {b.player_account.clan_id && <div><span className="text-white/40">الكلان: </span>{b.player_account.clan_id}</div>}
+              <div><span className="text-white/40">النقاط: </span>{b.player_account.points || 0}</div>
+            </div>
+          )}
+          {b.details && (
+            <div className="text-sm text-white/70 whitespace-pre-wrap">{b.details}</div>
+          )}
+          {b.proof_image && (
+            <img src={b.proof_image} alt="proof" className="rounded max-h-72 border b-soft" />
+          )}
+          <div className="text-[10px] text-white/30 flex justify-between">
+            <span>أضيف بواسطة: {b.added_by_username}</span>
+            <span>{new Date(b.created_at).toLocaleString("ar")}</span>
+          </div>
+        </article>
+      ))}
     </div>
   );
 }

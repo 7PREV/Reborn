@@ -44,11 +44,11 @@ function AppRoutes() {
       <Route path="/rules" element={<PublicShell><RulesPage /></PublicShell>} />
       <Route path="/tournaments" element={<PublicShell><TournamentsPage /></PublicShell>} />
       <Route path="/tournaments/:id" element={<PublicShell><TournamentDetailPage /></PublicShell>} />
+      <Route path="/blacklist" element={<PublicShell><BlacklistPage /></PublicShell>} />
 
       <Route path="/matches/:id" element={<Protected><Layout><MatchDetailPage /></Layout></Protected>} />
       <Route path="/me" element={<Protected><Layout><ProfilePage /></Layout></Protected>} />
       <Route path="/admin" element={<Protected><Layout><AdminPage /></Layout></Protected>} />
-      <Route path="/blacklist" element={<Protected><Layout><BlacklistPage /></Layout></Protected>} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

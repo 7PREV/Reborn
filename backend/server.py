@@ -36,6 +36,10 @@ CLAN_LIMIT_PLUS = 12
 VICE_LIMIT_DEFAULT = 1
 VICE_LIMIT_PLUS = 2
 
+ACT_CHANGE_COOLDOWN_DAYS = 14   # Activision ID can only be changed every 14 days
+ONLINE_WINDOW_MINUTES = 5       # User counts as "online" if last_seen_at within this window
+MATCH_PRAYER_BREAK_SECONDS = 15 * 60   # 15-min full-match prayer break (chat level)
+
 app = FastAPI(title="Rivals Esports API")
 api = APIRouter(prefix="/api")
 
@@ -93,11 +97,19 @@ def user_is_plus(u: dict) -> bool:
 
 
 def sanitize_user(u: dict) -> dict:
+    last_seen = u.get("last_seen_at")
+    is_online = False
+    if last_seen:
+        try:
+            is_online = (now_utc() - datetime.fromisoformat(last_seen)).total_seconds() < ONLINE_WINDOW_MINUTES * 60
+        except Exception:
+            is_online = False
     return {
         "id": u["id"],
         "email": u["email"],
         "username": u["username"],
         "act": u.get("act", ""),
+        "act_changed_at": u.get("act_changed_at"),
         "role": u.get("role", "player"),
         "clan_id": u.get("clan_id"),
         "points": u.get("points", 0),
@@ -108,6 +120,8 @@ def sanitize_user(u: dict) -> dict:
         "twitch_url": u.get("twitch_url", ""),
         "kick_url": u.get("kick_url", ""),
         "tiktok_url": u.get("tiktok_url", ""),
+        "last_seen_at": last_seen,
+        "is_online": is_online,
         "created_at": u.get("created_at"),
     }
 
@@ -190,6 +204,11 @@ async def get_current_user(request: Request) -> dict:
     user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
     if not user:
         raise HTTPException(401, "User not found")
+    # Record presence (used for online-clan filtering)
+    try:
+        await db.users.update_one({"id": user["id"]}, {"$set": {"last_seen_at": iso(now_utc())}})
+    except Exception:
+        pass
     return user
 
 
@@ -1040,6 +1059,19 @@ def _apply_map_vote(mp: dict, side: str, winner_label: str) -> dict:
     return mp
 
 
+def _is_match_prayer_active(match: dict) -> bool:
+    pb = match.get("match_prayer_break")
+    if not pb or pb.get("resumed"):
+        return False
+    ends_at = pb.get("ends_at")
+    if not ends_at:
+        return False
+    try:
+        return datetime.fromisoformat(ends_at) > now_utc()
+    except Exception:
+        return False
+
+
 @api.post("/matches/{match_id}/vote-map")
 async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_current_user)):
     match = await db.matches.find_one({"id": match_id}, {"_id": 0})
@@ -1047,6 +1079,8 @@ async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_curr
         raise HTTPException(404, "غير موجود")
     if match["status"] != "live":
         raise HTTPException(400, "المباراة منتهية")
+    if _is_match_prayer_active(match):
+        raise HTTPException(400, "بريك صلاة جارٍ — استأنف المباراة أولاً")
     if not (0 <= body.map_index < BO_TOTAL):
         raise HTTPException(400, "رقم ماب غير صحيح")
     if body.winner_clan_id not in (match["clan_a_id"], match["clan_b_id"]):
@@ -1931,13 +1965,32 @@ def _is_url(s: str) -> bool:
 
 @api.put("/me/profile")
 async def update_my_profile(body: ProfileUpdateIn, user: dict = Depends(get_current_user)):
-    """Update Activision ID and streaming URLs for the logged-in user."""
+    """Update Activision ID and streaming URLs for the logged-in user.
+    Activision ID can only be changed once per 14 days."""
     update = {}
     if body.act is not None:
         v = body.act.strip()
         if v and len(v) < 2:
             raise HTTPException(400, "Activision ID قصير جدا")
-        update["act"] = v
+        if v and v != (user.get("act") or ""):
+            last_changed = user.get("act_changed_at")
+            if last_changed:
+                try:
+                    last_dt = datetime.fromisoformat(last_changed)
+                    next_allowed = last_dt + timedelta(days=ACT_CHANGE_COOLDOWN_DAYS)
+                    if now_utc() < next_allowed:
+                        days = (next_allowed - now_utc()).days
+                        hrs = int((next_allowed - now_utc()).total_seconds() / 3600) % 24
+                        raise HTTPException(
+                            400,
+                            f"لا يمكنك تغيير الـ Activision ID إلا مرة كل أسبوعين. المتبقي: {days} يوم و{hrs} ساعة",
+                        )
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+            update["act"] = v
+            update["act_changed_at"] = iso(now_utc())
     for field in ("twitch_url", "kick_url", "tiktok_url"):
         val = getattr(body, field)
         if val is None:
@@ -2140,6 +2193,181 @@ async def archive_clan(clan_id: str, user: dict = Depends(get_current_user)):
     return {"ok": True, "kicked": len(member_ids)}
 
 
+@api.post("/clans/{clan_id}/restore")
+async def restore_clan(clan_id: str, user: dict = Depends(get_current_user)):
+    """Leader (or staff) restores a previously archived clan. Members stay kicked
+    (they were removed at archive time). Leader rejoins automatically."""
+    clan = await db.clans.find_one({"id": clan_id}, {"_id": 0})
+    if not clan:
+        raise HTTPException(404, "الكلان غير موجود")
+    if user["id"] != clan["leader_id"] and not is_staff(user):
+        raise HTTPException(403, "فقط القائد الأصلي أو المنظم")
+    if not clan.get("archived"):
+        raise HTTPException(400, "الكلان غير مؤرشف")
+    # If leader is in another clan now, block
+    leader_doc = await db.users.find_one({"id": clan["leader_id"]})
+    if leader_doc and leader_doc.get("clan_id") and leader_doc["clan_id"] != clan_id:
+        raise HTTPException(400, "القائد الأصلي في كلان آخر — اطلب منه المغادرة أولاً")
+    await db.clans.update_one(
+        {"id": clan_id},
+        {"$set": {
+            "archived": False,
+            "restored_at": iso(now_utc()),
+            "member_ids": [clan["leader_id"]],
+            "vice_leader_ids": [],
+        }},
+    )
+    # Bring leader back, clear any cooldown
+    await db.users.update_one(
+        {"id": clan["leader_id"]},
+        {"$set": {"clan_id": clan_id, "clan_cooldown_until": None}},
+    )
+    return {"ok": True, "clan_id": clan_id}
+
+
+@api.get("/me/archived-clan")
+async def my_archived_clan(user: dict = Depends(get_current_user)):
+    """Returns the most recent archived clan still led by the user (so they can restore it)."""
+    doc = await db.clans.find_one(
+        {"leader_id": user["id"], "archived": True},
+        {"_id": 0},
+        sort=[("archived_at", -1)],
+    )
+    return doc or None
+
+
+@api.post("/admin/clans/{clan_id}/transfer/{member_id}")
+async def admin_transfer_clan_ownership(clan_id: str, member_id: str, user: dict = Depends(get_current_user)):
+    """Owner/Admin transfers clan leadership to a member of that clan."""
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    clan = await _get_clan(clan_id)
+    if member_id == clan["leader_id"]:
+        raise HTTPException(400, "هذا اللاعب هو القائد بالفعل")
+    if member_id not in clan.get("member_ids", []):
+        raise HTTPException(400, "اللاعب ليس عضواً في الكلان")
+    target = await db.users.find_one({"id": member_id})
+    if not target:
+        raise HTTPException(404, "اللاعب غير موجود")
+    old_leader = clan["leader_id"]
+    # Old leader becomes a regular member (still in the clan); remove from vice list if present
+    await db.clans.update_one(
+        {"id": clan_id},
+        {
+            "$set": {"leader_id": member_id},
+            "$pull": {"vice_leader_ids": member_id},
+        },
+    )
+    return {"ok": True, "new_leader_id": member_id, "old_leader_id": old_leader}
+
+
+@api.get("/online-clans")
+async def list_online_clans(q: str = ""):
+    """Clans with at least one currently-online member (last_seen_at within ONLINE_WINDOW)."""
+    cutoff = iso(now_utc() - timedelta(minutes=ONLINE_WINDOW_MINUTES))
+    online_users = await db.users.find(
+        {"clan_id": {"$ne": None}, "last_seen_at": {"$gte": cutoff}},
+        {"_id": 0, "clan_id": 1},
+    ).to_list(1000)
+    clan_ids = list({u["clan_id"] for u in online_users if u.get("clan_id")})
+    if not clan_ids:
+        return []
+    query = {"id": {"$in": clan_ids}, "archived": {"$ne": True}}
+    if q:
+        query["$or"] = [
+            {"name": {"$regex": q, "$options": "i"}},
+            {"tag": {"$regex": q, "$options": "i"}},
+        ]
+    clans = await db.clans.find(query, {"_id": 0}).sort("points", -1).to_list(200)
+    return clans
+
+
+# ---------------- MATCH-LEVEL PRAYER BREAK (15-min chat-side pause) ----------------
+@api.post("/matches/{match_id}/match-prayer-break")
+async def start_match_prayer_break(match_id: str, user: dict = Depends(get_current_user)):
+    """A clan leader/vice starts a 15-min full-match prayer break.
+    All gameplay actions (votes, grace claims) are paused for the duration."""
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    if match["status"] != "live":
+        raise HTTPException(400, "المباراة منتهية")
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    side = _user_side(user, a, b)
+    if not side and not is_staff(user):
+        raise HTTPException(403, "للقادة والنواب فقط")
+    existing = match.get("match_prayer_break")
+    if existing and existing.get("ends_at"):
+        try:
+            ends = datetime.fromisoformat(existing["ends_at"])
+            if now_utc() < ends:
+                raise HTTPException(400, "بريك صلاة جارٍ بالفعل")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+    now = now_utc()
+    pb = {
+        "started_at": iso(now),
+        "ends_at": iso(now + timedelta(seconds=MATCH_PRAYER_BREAK_SECONDS)),
+        "started_by_clan": side or "ADMIN",
+        "started_by_user_id": user["id"],
+        "started_by_username": user["username"],
+        "resumed": False,
+    }
+    await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+    # System chat message
+    await db.chat_messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": "system",
+        "username": "النظام",
+        "user_role": "admin",
+        "user_clan_id": None,
+        "type": "text",
+        "text": f"🕌 بدأ بريك الصلاة (15 دقيقة) — توقف اللعب — بدأها كلان {side or 'إدارة'}",
+        "image": None, "video": None,
+        "opponent_decision": None, "admin_decision": None, "admin_note": "",
+        "created_at": iso(now_utc()),
+    })
+    return pb
+
+
+@api.post("/matches/{match_id}/match-prayer-resume")
+async def resume_match_prayer_break(match_id: str, user: dict = Depends(get_current_user)):
+    """The team that requested the prayer break (or staff) ends it early."""
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    pb = match.get("match_prayer_break")
+    if not pb:
+        raise HTTPException(400, "لا يوجد بريك صلاة جارٍ")
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    side = _user_side(user, a, b)
+    if not is_staff(user) and pb.get("started_by_clan") != side:
+        raise HTTPException(403, "فقط الفريق الذي بدأ البريك يمكنه إنهاؤه")
+    pb["resumed"] = True
+    pb["resumed_at"] = iso(now_utc())
+    pb["ends_at"] = iso(now_utc())
+    await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+    await db.chat_messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": "system",
+        "username": "النظام",
+        "user_role": "admin",
+        "user_clan_id": None,
+        "type": "text",
+        "text": "▶️ تم إنهاء بريك الصلاة — استئناف المباراة",
+        "image": None, "video": None,
+        "opponent_decision": None, "admin_decision": None, "admin_note": "",
+        "created_at": iso(now_utc()),
+    })
+    return pb
+
+
 # ---------------- ADMIN: edit users / clans, forgot-password ----------------
 @api.put("/admin/users/{user_id}")
 async def admin_edit_user(user_id: str, body: AdminUserEditIn, user: dict = Depends(get_current_user)):
@@ -2244,9 +2472,8 @@ async def admin_complete_reset(rid: str, user: dict = Depends(get_current_user))
 
 # ---------------- BLACKLIST (cheaters log) ----------------
 @api.get("/blacklist")
-async def list_blacklist(user: dict = Depends(get_current_user)):
-    if not is_staff(user):
-        raise HTTPException(403, "للمنظمين فقط")
+async def list_blacklist():
+    """PUBLIC list of blacklisted cheaters — anyone can view, only staff can mutate."""
     docs = await db.blacklist.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
     return docs
 

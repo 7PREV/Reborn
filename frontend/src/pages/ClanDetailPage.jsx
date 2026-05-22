@@ -243,7 +243,7 @@ export default function ClanDetailPage() {
 
   useEffect(() => {
     load();
-    api.get("/clans").then((r) => setAllClans(r.data)).catch(() => {});
+    api.get("/online-clans").then((r) => setAllClans(r.data)).catch(() => {});
   }, [load]);
 
   // Roles / states derived from clan + user

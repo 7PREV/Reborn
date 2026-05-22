@@ -506,11 +506,17 @@ def test_blacklist_crud(admin):
     assert d.status_code == 200
 
 
-def test_blacklist_player_forbidden():
+def test_blacklist_player_can_view():
+    """Blacklist GET is now public — players (and guests) can view."""
     s, u, t, _ = _register("blperm")
     h = {"Authorization": f"Bearer {t}"}
     r = requests.get(f"{API}/blacklist", headers=h)
-    assert r.status_code == 403
+    assert r.status_code == 200
+    # But cannot mutate (pass valid lengths so we hit the auth check, not 422)
+    add = requests.post(f"{API}/blacklist", headers=h, json={
+        "player_name": "ProperName", "cheat_tool": "Aimbot",
+    })
+    assert add.status_code == 403
 
 
 def test_admin_can_edit_user(admin):
@@ -549,3 +555,142 @@ def test_clan_archive_kicks_members(admin):
     assert me["clan_id"] is None
     # Member is in cooldown
     assert me.get("clan_cooldown_until")
+
+
+# ---- Final batch: restore, transfer, online clans, match prayer break, act cooldown, public blacklist ----
+def test_blacklist_public_anonymous():
+    """Even unauthenticated visitors can read blacklist."""
+    r = requests.get(f"{API}/blacklist")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_clan_restore_brings_clan_back(admin):
+    s_l, u_l, t_l, _ = _register("rest_l")
+    h_l = {"Authorization": f"Bearer {t_l}"}
+    cr = requests.post(f"{API}/clans", headers=h_l, json={
+        "name": f"RestClan_{uuid.uuid4().hex[:6]}",
+        "tag": f"RC{uuid.uuid4().hex[:3]}",
+    })
+    assert cr.status_code == 200
+    cid = cr.json()["id"]
+    a = requests.post(f"{API}/clans/{cid}/archive", headers=h_l)
+    assert a.status_code == 200
+    # Confirm leader sees archived clan
+    arch = requests.get(f"{API}/me/archived-clan", headers=h_l).json()
+    assert arch and arch["id"] == cid
+    # Restore
+    r = requests.post(f"{API}/clans/{cid}/restore", headers=h_l)
+    assert r.status_code == 200
+    # Leader's clan_id should be restored
+    me = requests.get(f"{API}/auth/me", headers=h_l).json()
+    assert me["clan_id"] == cid
+
+
+def test_admin_transfer_clan_ownership(admin):
+    s_l, u_l, t_l, _ = _register("xfer_l")
+    s_m, u_m, t_m, _ = _register("xfer_m")
+    h_l = {"Authorization": f"Bearer {t_l}"}
+    h_m = {"Authorization": f"Bearer {t_m}"}
+    h_admin = {"Authorization": f"Bearer {admin['token']}"}
+    cr = requests.post(f"{API}/clans", headers=h_l, json={
+        "name": f"XferClan_{uuid.uuid4().hex[:6]}",
+        "tag": f"XF{uuid.uuid4().hex[:3]}",
+    })
+    cid = cr.json()["id"]
+    requests.post(f"{API}/clans/{cid}/join-request", headers=h_m)
+    reqs = requests.get(f"{API}/clans/{cid}/requests", headers=h_l).json()
+    requests.post(f"{API}/clans/{cid}/requests/{reqs[0]['id']}", headers=h_l, json={"action": "accept"})
+    r = requests.post(f"{API}/admin/clans/{cid}/transfer/{u_m['id']}", headers=h_admin)
+    assert r.status_code == 200
+    detail = requests.get(f"{API}/clans/{cid}").json()
+    assert detail["leader_id"] == u_m["id"]
+
+
+def test_online_clans_filter_returns_only_active():
+    """A freshly-logged-in leader's clan must appear in /clans/online."""
+    s_l, u_l, t_l, _ = _register("online_l")
+    h_l = {"Authorization": f"Bearer {t_l}"}
+    cr = requests.post(f"{API}/clans", headers=h_l, json={
+        "name": f"OnlineClan_{uuid.uuid4().hex[:6]}",
+        "tag": f"ON{uuid.uuid4().hex[:3]}",
+    })
+    cid = cr.json()["id"]
+    # Touch /auth/me to update last_seen_at
+    requests.get(f"{API}/auth/me", headers=h_l)
+    online = requests.get(f"{API}/online-clans").json()
+    assert any(c["id"] == cid for c in online)
+
+
+def test_act_change_cooldown_blocks_second_change():
+    s, u, t, _ = _register("actcd")
+    h = {"Authorization": f"Bearer {t}"}
+    # First change should succeed (no prior change tracked)
+    r1 = requests.put(f"{API}/me/profile", headers=h, json={"act": f"first_{uuid.uuid4().hex[:5]}"})
+    assert r1.status_code == 200
+    assert r1.json().get("act_changed_at")
+    # Immediate second change must fail with Arabic message
+    r2 = requests.put(f"{API}/me/profile", headers=h, json={"act": f"second_{uuid.uuid4().hex[:5]}"})
+    assert r2.status_code == 400
+    assert "أسبوعين" in r2.json().get("detail", "")
+
+
+def test_match_prayer_break_pauses_voting(admin):
+    s_a, u_a, t_a, _ = _register("mpb_a")
+    s_b, u_b, t_b, _ = _register("mpb_b")
+    h_admin = {"Authorization": f"Bearer {admin['token']}"}
+    h_a = {"Authorization": f"Bearer {t_a}"}
+    h_b = {"Authorization": f"Bearer {t_b}"}
+    ca = requests.post(f"{API}/clans", headers=h_a, json={
+        "name": f"MPBA_{uuid.uuid4().hex[:6]}", "tag": f"MA{uuid.uuid4().hex[:3]}",
+    }).json()
+    cb = requests.post(f"{API}/clans", headers=h_b, json={
+        "name": f"MPBB_{uuid.uuid4().hex[:6]}", "tag": f"MB{uuid.uuid4().hex[:3]}",
+    }).json()
+    m = requests.post(f"{API}/matches", headers=h_admin, json={
+        "clan_a_id": ca["id"], "clan_b_id": cb["id"],
+    }).json()
+    mid = m["id"]
+    # Start prayer break as leader A
+    pb = requests.post(f"{API}/matches/{mid}/match-prayer-break", headers=h_a)
+    assert pb.status_code == 200
+    assert pb.json().get("ends_at")
+    # Voting must now be blocked
+    v = requests.post(f"{API}/matches/{mid}/vote-map", headers=h_a, json={
+        "map_index": 0, "winner_clan_id": ca["id"],
+    })
+    assert v.status_code == 400
+    assert "بريك" in v.json().get("detail", "")
+    # Resume as leader A
+    rs = requests.post(f"{API}/matches/{mid}/match-prayer-resume", headers=h_a)
+    assert rs.status_code == 200
+    # Voting works after resume
+    v2 = requests.post(f"{API}/matches/{mid}/vote-map", headers=h_a, json={
+        "map_index": 0, "winner_clan_id": ca["id"],
+    })
+    assert v2.status_code == 200
+
+
+def test_match_prayer_resume_only_starter_or_admin(admin):
+    s_a, u_a, t_a, _ = _register("mpb2_a")
+    s_b, u_b, t_b, _ = _register("mpb2_b")
+    h_admin = {"Authorization": f"Bearer {admin['token']}"}
+    h_a = {"Authorization": f"Bearer {t_a}"}
+    h_b = {"Authorization": f"Bearer {t_b}"}
+    ca = requests.post(f"{API}/clans", headers=h_a, json={
+        "name": f"MP2A_{uuid.uuid4().hex[:6]}", "tag": f"PA{uuid.uuid4().hex[:3]}",
+    }).json()
+    cb = requests.post(f"{API}/clans", headers=h_b, json={
+        "name": f"MP2B_{uuid.uuid4().hex[:6]}", "tag": f"PB{uuid.uuid4().hex[:3]}",
+    }).json()
+    m = requests.post(f"{API}/matches", headers=h_admin, json={
+        "clan_a_id": ca["id"], "clan_b_id": cb["id"],
+    }).json()
+    mid = m["id"]
+    requests.post(f"{API}/matches/{mid}/match-prayer-break", headers=h_a)
+    # Opponent leader cannot resume
+    r = requests.post(f"{API}/matches/{mid}/match-prayer-resume", headers=h_b)
+    assert r.status_code == 403
+    # Admin can resume
+    r2 = requests.post(f"{API}/matches/{mid}/match-prayer-resume", headers=h_admin)
+    assert r2.status_code == 200

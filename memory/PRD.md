@@ -29,7 +29,14 @@
 - Owner role (Prev) + admin role hierarchy
 
 ### Latest launch batch (May 22, 2026)
-- **Activision ID (`act`) required at registration** + editable from profile
+### Final batch v2 (May 22, 2026 — afternoon)
+- **Public Blacklist tab** in main nav (`/blacklist`) — anyone can read, only staff can mutate
+- **Clan Restore from Archive**: leader of an archived clan sees a "استعادة الكلان من الأرشفة" card on `/me`; backend `POST /api/clans/{id}/restore` + `GET /api/me/archived-clan`
+- **Transfer Clan Ownership** in Admin dashboard: `POST /api/admin/clans/{cid}/transfer/{member_id}` opens a member-pick modal in the Clan Editor
+- **Activision ID 14-day cooldown**: tracked via `act_changed_at`; locked input + Arabic countdown on profile; backend rejects with "لا يمكنك تغيير الـ Activision ID إلا مرة كل أسبوعين"
+- **Match-level Prayer Break (15-min)**: `POST /api/matches/{id}/match-prayer-break` + `/match-prayer-resume`; pauses voting and grace; live countdown in the chat header with "العودة من البريك" button for the team that started it
+- **Online clans filter for matchmaking**: `last_seen_at` updated on every authenticated request; `GET /api/online-clans` returns only clans with members active in the last 5 minutes; ChallengeModal now uses this list
+- **Activision ID required at registration** + editable from profile
 - **2h clan-leave cooldown** (leave/kick/archive)
 - **Clan challenge → request/accept/reject flow** (no auto-match)
 - **Match map timers**: 10-min Grace Period + 10-min Prayer Break + auto-claim win

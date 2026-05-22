@@ -14,6 +14,7 @@ export default function Layout({ children }) {
     { to: "/players", label: "اللاعبون", icon: Users, id: "nav-players" },
     { to: "/leaderboard", label: "النتائج", icon: Trophy, id: "nav-leaderboard" },
     { to: "/rules", label: "القوانين", icon: ScrollText, id: "nav-rules" },
+    { to: "/blacklist", label: "القائمة السوداء", icon: ShieldOff, id: "nav-blacklist" },
   ];
 
   return (
@@ -54,16 +55,6 @@ export default function Layout({ children }) {
           </nav>
 
           <div className="flex-1" />
-
-          {user && (user.role === "admin" || user.role === "owner") && (
-            <NavLink
-              to="/blacklist"
-              data-testid="nav-blacklist"
-              className="hidden md:inline-flex items-center gap-1.5 text-xs uppercase tracking-widest text-destructive hover:text-destructive/80 border border-destructive/30 rounded-md px-3 py-1.5"
-            >
-              <ShieldOff size={14} /> القائمة السوداء
-            </NavLink>
-          )}
 
           {user && (user.role === "admin" || user.role === "owner") && (
             <NavLink

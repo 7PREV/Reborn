@@ -158,6 +158,8 @@ function ClanEditor() {
   const [clans, setClans] = useState([]);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", tag: "", description: "" });
+  const [transferTarget, setTransferTarget] = useState(null);
+
   const load = useCallback(async () => {
     const { data } = await api.get("/clans");
     setClans(data);
@@ -177,6 +179,25 @@ function ClanEditor() {
     }
   };
 
+  const startTransfer = async (c) => {
+    const { data } = await api.get(`/clans/${c.id}`);
+    setTransferTarget(data);
+  };
+
+  const transferOwnership = async (memberId) => {
+    if (!transferTarget) return;
+    // eslint-disable-next-line no-alert
+    if (!confirm("نقل ملكية الكلان لهذا اللاعب؟")) return;
+    try {
+      await api.post(`/admin/clans/${transferTarget.id}/transfer/${memberId}`);
+      toast.success("تم نقل ملكية الكلان");
+      setTransferTarget(null);
+      load();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    }
+  };
+
   return (
     <section>
       <h2 className="font-display font-black text-2xl mb-4 flex items-center gap-2">
@@ -190,6 +211,9 @@ function ClanEditor() {
               <div className="font-bold truncate">{c.name} <span className="text-xs text-gold-500">[{c.tag}]</span></div>
               <div className="text-[10px] text-white/40 truncate">{c.points} نقطة • {c.member_ids?.length || 0} لاعب</div>
             </div>
+            <button data-testid={`transfer-clan-${c.id}`} onClick={() => startTransfer(c)} className="px-2 py-1 rounded text-xs bg-gold-500/10 text-gold-500 hover:bg-gold-500/20 flex items-center gap-1">
+              <Crown size={12} /> نقل الملكية
+            </button>
             <button data-testid={`edit-clan-${c.id}`} onClick={() => startEdit(c)} className="px-2 py-1 rounded text-xs bg-white/5 hover:bg-white/10 flex items-center gap-1">
               <Edit3 size={12} /> تعديل
             </button>
@@ -209,6 +233,39 @@ function ClanEditor() {
             <textarea data-testid="edit-clan-desc" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="الوصف" rows={2} className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm resize-none" />
             <button data-testid="edit-clan-submit" type="submit" className="w-full py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400">حفظ</button>
           </form>
+        </div>
+      )}
+      {transferTarget && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 backdrop-blur-xl p-4">
+          <div className="bg-surface border b-soft rounded-xl p-6 w-full max-w-md space-y-3" data-testid="transfer-modal">
+            <div className="flex items-center justify-between">
+              <h2 className="font-display font-black text-xl flex items-center gap-2">
+                <Crown size={18} className="text-gold-500" /> نقل ملكية {transferTarget.name}
+              </h2>
+              <button type="button" onClick={() => setTransferTarget(null)} className="p-1 rounded hover:bg-white/5"><X size={16} /></button>
+            </div>
+            <p className="text-xs text-white/50">اختر اللاعب الذي ستنقل إليه القيادة. يجب أن يكون عضواً في الكلان.</p>
+            <div className="max-h-[300px] overflow-y-auto divide-y divide-white/5">
+              {(transferTarget.members || []).filter((m) => m.id !== transferTarget.leader_id).map((m) => (
+                <button
+                  key={m.id}
+                  data-testid={`transfer-to-${m.id}`}
+                  onClick={() => transferOwnership(m.id)}
+                  className="w-full p-3 flex items-center gap-3 hover:bg-gold-500/5 text-right"
+                >
+                  <div className="h-8 w-8 rounded-md bg-white/5 grid place-items-center text-gold-500 font-display">{m.username[0]?.toUpperCase()}</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-bold text-sm">{m.username}</div>
+                    <div className="text-[10px] text-white/40">{m.points || 0} نقطة</div>
+                  </div>
+                  <Crown size={14} className="text-gold-500" />
+                </button>
+              ))}
+              {(transferTarget.members || []).filter((m) => m.id !== transferTarget.leader_id).length === 0 && (
+                <div className="p-4 text-center text-white/40 text-sm">لا يوجد أعضاء آخرون</div>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </section>

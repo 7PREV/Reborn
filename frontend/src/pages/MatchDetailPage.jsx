@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import MapsBoard from "../components/match/MapsBoard";
 import ChatMessage from "../components/match/ChatMessage";
 import LiveStreamsPanel from "../components/match/LiveStreamsPanel";
+import MatchPrayerBreak from "../components/match/MatchPrayerBreak";
 
 const IMG_MAX = 3_000_000;
 const POLL_MS = 4000;
@@ -380,12 +381,20 @@ export default function MatchDetailPage() {
 
       <div className="grid lg:grid-cols-[1fr_300px] gap-6">
         <div className="bg-surface border b-soft rounded-xl overflow-hidden">
-          <div className="p-4 border-b b-soft flex items-center gap-2">
+          <div className="p-4 border-b b-soft flex items-center gap-2 flex-wrap">
             <Shield size={18} className="text-gold-500" />
             <h2 className="font-display font-black text-lg">شات المباراة</h2>
-            <span className="text-xs text-white/40 mr-auto">
+            <span className="text-xs text-white/40">
               {isStaffOfMatch ? "نص + وسائط" : "وسائط فقط (للزوار)"}
             </span>
+            <div className="mr-auto">
+              <MatchPrayerBreak
+                match={match}
+                userSide={isLeaderA ? "A" : isLeaderB ? "B" : null}
+                isStaff={isAdminFlag}
+                onUpdate={() => { loadMatch(); loadChat(); }}
+              />
+            </div>
           </div>
 
           <div ref={scrollRef} className="h-[500px] overflow-y-auto p-4 space-y-3" data-testid="chat-messages">
