@@ -6,6 +6,7 @@ import { Send, Image as ImageIcon, Video, Shield, Flag, Lock, LogOut } from "luc
 import { toast } from "sonner";
 import MapsBoard from "../components/match/MapsBoard";
 import ChatMessage from "../components/match/ChatMessage";
+import LiveStreamsPanel from "../components/match/LiveStreamsPanel";
 
 const IMG_MAX = 3_000_000;
 const POLL_MS = 4000;
@@ -377,48 +378,54 @@ export default function MatchDetailPage() {
         )}
       </div>
 
-      <div className="bg-surface border b-soft rounded-xl overflow-hidden">
-        <div className="p-4 border-b b-soft flex items-center gap-2">
-          <Shield size={18} className="text-gold-500" />
-          <h2 className="font-display font-black text-lg">شات المباراة</h2>
-          <span className="text-xs text-white/40 mr-auto">
-            {isStaffOfMatch ? "نص + وسائط" : "وسائط فقط (للزوار)"}
-          </span>
-        </div>
-
-        <div ref={scrollRef} className="h-[500px] overflow-y-auto p-4 space-y-3" data-testid="chat-messages">
-          {messages.length === 0 && (
-            <div className="text-center text-white/40 py-12">لا توجد رسائل بعد</div>
-          )}
-          {messages.map((m) => (
-            <ChatMessage
-              key={m.id}
-              m={m}
-              user={user}
-              isAdmin={isAdminFlag}
-              userClanId={userClanInChat}
-              onOpponentDecide={opponentDecide}
-              onAdminDecide={adminDecide}
-              matchClans={matchClans}
-            />
-          ))}
-        </div>
-
-        {canWrite ? (
-          <ChatComposer
-            text={text} image={image} video={video}
-            videoProgress={videoProgress}
-            isPlus={!!user?.is_plus}
-            onText={setText} onImage={onImage} onVideo={onVideo}
-            onClearImage={() => setImage(null)}
-            onClearVideo={() => setVideo(null)}
-            onSubmit={send}
-          />
-        ) : (
-          <div className="border-t b-soft p-4 text-center text-white/40 text-sm flex items-center justify-center gap-2" data-testid="chat-readonly">
-            <Lock size={14} /> الكتابة للقادة، النواب والمنظمين فقط
+      <div className="grid lg:grid-cols-[1fr_300px] gap-6">
+        <div className="bg-surface border b-soft rounded-xl overflow-hidden">
+          <div className="p-4 border-b b-soft flex items-center gap-2">
+            <Shield size={18} className="text-gold-500" />
+            <h2 className="font-display font-black text-lg">شات المباراة</h2>
+            <span className="text-xs text-white/40 mr-auto">
+              {isStaffOfMatch ? "نص + وسائط" : "وسائط فقط (للزوار)"}
+            </span>
           </div>
-        )}
+
+          <div ref={scrollRef} className="h-[500px] overflow-y-auto p-4 space-y-3" data-testid="chat-messages">
+            {messages.length === 0 && (
+              <div className="text-center text-white/40 py-12">لا توجد رسائل بعد</div>
+            )}
+            {messages.map((m) => (
+              <ChatMessage
+                key={m.id}
+                m={m}
+                user={user}
+                isAdmin={isAdminFlag}
+                userClanId={userClanInChat}
+                onOpponentDecide={opponentDecide}
+                onAdminDecide={adminDecide}
+                matchClans={matchClans}
+              />
+            ))}
+          </div>
+
+          {canWrite ? (
+            <ChatComposer
+              text={text} image={image} video={video}
+              videoProgress={videoProgress}
+              isPlus={!!user?.is_plus}
+              onText={setText} onImage={onImage} onVideo={onVideo}
+              onClearImage={() => setImage(null)}
+              onClearVideo={() => setVideo(null)}
+              onSubmit={send}
+            />
+          ) : (
+            <div className="border-t b-soft p-4 text-center text-white/40 text-sm flex items-center justify-center gap-2" data-testid="chat-readonly">
+              <Lock size={14} /> الكتابة للقادة، النواب والمنظمين فقط
+            </div>
+          )}
+        </div>
+
+        <aside className="lg:sticky lg:top-20 self-start">
+          <LiveStreamsPanel matchId={id} />
+        </aside>
       </div>
     </div>
   );

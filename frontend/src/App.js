@@ -14,6 +14,7 @@ import AdminPage from "./pages/AdminPage";
 import RulesPage from "./pages/RulesPage";
 import TournamentsPage from "./pages/TournamentsPage";
 import TournamentDetailPage from "./pages/TournamentDetailPage";
+import BlacklistPage from "./pages/BlacklistPage";
 import { Toaster } from "sonner";
 
 function Protected({ children }) {
@@ -47,6 +48,7 @@ function AppRoutes() {
       <Route path="/matches/:id" element={<Protected><Layout><MatchDetailPage /></Layout></Protected>} />
       <Route path="/me" element={<Protected><Layout><ProfilePage /></Layout></Protected>} />
       <Route path="/admin" element={<Protected><Layout><AdminPage /></Layout></Protected>} />
+      <Route path="/blacklist" element={<Protected><Layout><BlacklistPage /></Layout></Protected>} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -1,6 +1,6 @@
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
-import { Trophy, Users, Swords, LogOut, Shield, Home as HomeIcon, ScrollText, Crown, Sparkles, Award } from "lucide-react";
+import { Trophy, Users, Swords, LogOut, Shield, Home as HomeIcon, ScrollText, Crown, Sparkles, Award, ShieldOff } from "lucide-react";
 
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
@@ -54,6 +54,16 @@ export default function Layout({ children }) {
           </nav>
 
           <div className="flex-1" />
+
+          {user && (user.role === "admin" || user.role === "owner") && (
+            <NavLink
+              to="/blacklist"
+              data-testid="nav-blacklist"
+              className="hidden md:inline-flex items-center gap-1.5 text-xs uppercase tracking-widest text-destructive hover:text-destructive/80 border border-destructive/30 rounded-md px-3 py-1.5"
+            >
+              <ShieldOff size={14} /> القائمة السوداء
+            </NavLink>
+          )}
 
           {user && (user.role === "admin" || user.role === "owner") && (
             <NavLink

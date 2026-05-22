@@ -2,18 +2,44 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { Shield, Trophy, Mail, Check, X, Sparkles } from "lucide-react";
+import { Shield, Trophy, Mail, Check, X, Sparkles, Tv, Save } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ProfilePage() {
   const { user, refresh } = useAuth();
   const [invites, setInvites] = useState([]);
+  const [streamForm, setStreamForm] = useState({ twitch_url: "", kick_url: "", tiktok_url: "", act: "" });
+  const [savingStreams, setSavingStreams] = useState(false);
 
   const load = async () => {
     const { data } = await api.get("/me/invites");
     setInvites(data);
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (user) {
+      setStreamForm({
+        twitch_url: user.twitch_url || "",
+        kick_url: user.kick_url || "",
+        tiktok_url: user.tiktok_url || "",
+        act: user.act || "",
+      });
+    }
+  }, [user]);
+
+  const saveStreams = async (e) => {
+    e.preventDefault();
+    setSavingStreams(true);
+    try {
+      await api.put("/me/profile", streamForm);
+      toast.success("تم حفظ الملف الشخصي");
+      await refresh();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setSavingStreams(false);
+    }
+  };
 
   const respond = async (inv, action) => {
     try {
@@ -93,6 +119,65 @@ export default function ProfilePage() {
           {user.is_plus ? "إلغاء Plus" : "تفعيل Plus (مجاناً للتجربة)"}
         </button>
       </div>
+
+      <section data-testid="streams-section" className="bg-surface border b-soft rounded-xl p-6">
+        <h2 className="font-display font-black text-xl mb-3 flex items-center gap-2">
+          <Tv className="text-gold-500" size={20} /> روابط البث المباشر و Activision
+        </h2>
+        <form onSubmit={saveStreams} className="space-y-3">
+          <div>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">Activision ID</label>
+            <input
+              data-testid="profile-act-input"
+              value={streamForm.act}
+              onChange={(e) => setStreamForm({ ...streamForm, act: e.target.value })}
+              minLength={2}
+              maxLength={40}
+              placeholder="YourName#1234"
+              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">Twitch URL</label>
+            <input
+              data-testid="profile-twitch-input"
+              value={streamForm.twitch_url}
+              onChange={(e) => setStreamForm({ ...streamForm, twitch_url: e.target.value })}
+              placeholder="https://twitch.tv/yourname"
+              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">Kick URL</label>
+            <input
+              data-testid="profile-kick-input"
+              value={streamForm.kick_url}
+              onChange={(e) => setStreamForm({ ...streamForm, kick_url: e.target.value })}
+              placeholder="https://kick.com/yourname"
+              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">TikTok URL (رابط فقط)</label>
+            <input
+              data-testid="profile-tiktok-input"
+              value={streamForm.tiktok_url}
+              onChange={(e) => setStreamForm({ ...streamForm, tiktok_url: e.target.value })}
+              placeholder="https://tiktok.com/@yourname"
+              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
+            />
+            <div className="text-[10px] text-white/40 mt-1">TikTok يظهر كرابط في الملف الشخصي فقط (لا يدعم كشف البث المباشر).</div>
+          </div>
+          <button
+            data-testid="save-profile-btn"
+            type="submit"
+            disabled={savingStreams}
+            className="px-4 py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 disabled:opacity-50 flex items-center gap-2"
+          >
+            <Save size={14} /> {savingStreams ? "..." : "حفظ"}
+          </button>
+        </form>
+      </section>
 
       {user.clan_cooldown_until && new Date(user.clan_cooldown_until) > new Date() && (
         <div data-testid="cooldown-banner" className="bg-destructive/10 border border-destructive/30 rounded-xl p-5 flex items-center gap-3">

@@ -2,14 +2,75 @@ import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search } from "lucide-react";
+import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search, Edit3, Mail, KeyRound, X } from "lucide-react";
 import { toast } from "sonner";
 import BannerManager from "../components/admin/BannerManager";
+
+function EditUserModal({ target, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    username: target.username || "",
+    email: target.email || "",
+    password: "",
+    act: target.act || "",
+  });
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    const payload = {};
+    if (form.username !== target.username) payload.username = form.username;
+    if (form.email !== target.email) payload.email = form.email;
+    if (form.password) payload.password = form.password;
+    if (form.act !== (target.act || "")) payload.act = form.act;
+    if (Object.keys(payload).length === 0) {
+      toast.info("لا تغييرات");
+      return onClose();
+    }
+    setBusy(true);
+    try {
+      await api.put(`/admin/users/${target.id}`, payload);
+      toast.success("تم تحديث المستخدم");
+      onSaved();
+      onClose();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 backdrop-blur-xl p-4">
+      <form onSubmit={submit} className="bg-surface border b-soft rounded-xl p-6 w-full max-w-md space-y-3" data-testid="edit-user-form">
+        <div className="flex items-center justify-between">
+          <h2 className="font-display font-black text-xl flex items-center gap-2"><Edit3 size={18} className="text-gold-500" /> تعديل {target.username}</h2>
+          <button type="button" onClick={onClose} className="p-1 rounded hover:bg-white/5"><X size={16} /></button>
+        </div>
+        <div>
+          <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">اسم المستخدم</label>
+          <input data-testid="edit-username" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm" />
+        </div>
+        <div>
+          <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">البريد</label>
+          <input data-testid="edit-email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm" />
+        </div>
+        <div>
+          <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">Activision ID</label>
+          <input data-testid="edit-act" value={form.act} onChange={(e) => setForm({ ...form, act: e.target.value })} className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm" />
+        </div>
+        <div>
+          <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">كلمة مرور جديدة (اختياري)</label>
+          <input data-testid="edit-password" type="text" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="اتركها فارغة لعدم التغيير" className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm" />
+        </div>
+        <button data-testid="edit-user-submit" disabled={busy} type="submit" className="w-full py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 disabled:opacity-50">{busy ? "..." : "حفظ"}</button>
+      </form>
+    </div>
+  );
+}
 
 function UserRoleManager() {
   const { user } = useAuth();
   const [users, setUsers] = useState([]);
   const [q, setQ] = useState("");
+  const [editTarget, setEditTarget] = useState(null);
   const isOwner = user?.role === "owner";
 
   const load = useCallback(async () => {
@@ -36,7 +97,7 @@ function UserRoleManager() {
   return (
     <section>
       <h2 className="font-display font-black text-2xl mb-4 flex items-center gap-2">
-        <UserCheck className="text-gold-500" /> إدارة الأدوار {isOwner && <span className="text-[10px] uppercase tracking-widest text-gold-500">المالك فقط</span>}
+        <UserCheck className="text-gold-500" /> إدارة اللاعبين {isOwner && <span className="text-[10px] uppercase tracking-widest text-gold-500">المالك فقط</span>}
       </h2>
       <div className="relative max-w-md mb-4">
         <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-white/30" />
@@ -59,11 +120,16 @@ function UserRoleManager() {
                 {u.role === "owner" && <Crown size={12} className="text-gold-500" />}
                 {u.is_plus && <Sparkles size={10} className="text-gold-500" />}
               </div>
-              <div className="text-[10px] text-white/40 truncate">{u.email}</div>
+              <div className="text-[10px] text-white/40 truncate">{u.email}{u.act ? ` • ${u.act}` : ""}</div>
             </div>
             <div className="text-[10px] uppercase tracking-widest text-white/40">
               {u.role === "owner" ? "مالك" : u.role === "admin" ? "منظم" : "لاعب"}
             </div>
+            {u.role !== "owner" && (
+              <button data-testid={`edit-user-${u.id}`} onClick={() => setEditTarget(u)} className="px-2 py-1 rounded text-xs bg-white/5 hover:bg-white/10 flex items-center gap-1">
+                <Edit3 size={12} /> تعديل
+              </button>
+            )}
             {isOwner && u.role !== "owner" && (
               <div className="flex gap-1">
                 {u.role === "admin" ? (
@@ -81,6 +147,119 @@ function UserRoleManager() {
         ))}
         {filtered.length === 0 && <div className="p-4 text-center text-white/40 text-sm">لا توجد نتائج</div>}
       </div>
+      {editTarget && (
+        <EditUserModal target={editTarget} onClose={() => setEditTarget(null)} onSaved={load} />
+      )}
+    </section>
+  );
+}
+
+function ClanEditor() {
+  const [clans, setClans] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({ name: "", tag: "", description: "" });
+  const load = useCallback(async () => {
+    const { data } = await api.get("/clans");
+    setClans(data);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const startEdit = (c) => { setEditing(c); setForm({ name: c.name, tag: c.tag, description: c.description || "" }); };
+  const save = async (e) => {
+    e.preventDefault();
+    try {
+      await api.put(`/admin/clans/${editing.id}`, form);
+      toast.success("تم تحديث الكلان");
+      setEditing(null);
+      load();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    }
+  };
+
+  return (
+    <section>
+      <h2 className="font-display font-black text-2xl mb-4 flex items-center gap-2">
+        <Shield className="text-gold-500" /> إدارة الكلانات
+      </h2>
+      <div className="bg-surface border b-soft rounded-lg divide-y divide-white/5 max-h-[400px] overflow-y-auto">
+        {clans.map((c) => (
+          <div key={c.id} className="p-3 flex items-center gap-3" data-testid={`admin-clan-${c.id}`}>
+            <div className="h-9 w-9 rounded-md bg-gold-500/10 grid place-items-center text-gold-500"><Shield size={16} /></div>
+            <div className="flex-1 min-w-0">
+              <div className="font-bold truncate">{c.name} <span className="text-xs text-gold-500">[{c.tag}]</span></div>
+              <div className="text-[10px] text-white/40 truncate">{c.points} نقطة • {c.member_ids?.length || 0} لاعب</div>
+            </div>
+            <button data-testid={`edit-clan-${c.id}`} onClick={() => startEdit(c)} className="px-2 py-1 rounded text-xs bg-white/5 hover:bg-white/10 flex items-center gap-1">
+              <Edit3 size={12} /> تعديل
+            </button>
+          </div>
+        ))}
+        {clans.length === 0 && <div className="p-4 text-center text-white/40 text-sm">لا توجد كلانات</div>}
+      </div>
+      {editing && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 backdrop-blur-xl p-4">
+          <form onSubmit={save} className="bg-surface border b-soft rounded-xl p-6 w-full max-w-md space-y-3" data-testid="edit-clan-form">
+            <div className="flex items-center justify-between">
+              <h2 className="font-display font-black text-xl">تعديل {editing.name}</h2>
+              <button type="button" onClick={() => setEditing(null)} className="p-1 rounded hover:bg-white/5"><X size={16} /></button>
+            </div>
+            <input data-testid="edit-clan-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="الاسم" className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm" />
+            <input data-testid="edit-clan-tag" value={form.tag} onChange={(e) => setForm({ ...form, tag: e.target.value })} placeholder="التاج" className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm" />
+            <textarea data-testid="edit-clan-desc" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="الوصف" rows={2} className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm resize-none" />
+            <button data-testid="edit-clan-submit" type="submit" className="w-full py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400">حفظ</button>
+          </form>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PasswordResetsPanel() {
+  const [resets, setResets] = useState([]);
+  const load = useCallback(async () => {
+    try {
+      const { data } = await api.get("/admin/password-resets");
+      setResets(data);
+    } catch (err) {
+      // expected for non-staff
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const complete = async (rid) => {
+    await api.post(`/admin/password-resets/${rid}/complete`);
+    toast.success("تم تعليم الطلب كمكتمل");
+    load();
+  };
+
+  return (
+    <section data-testid="password-resets-section">
+      <h2 className="font-display font-black text-2xl mb-4 flex items-center gap-2">
+        <KeyRound className="text-gold-500" /> طلبات استعادة كلمة المرور
+      </h2>
+      <div className="bg-surface border b-soft rounded-lg divide-y divide-white/5">
+        {resets.length === 0 && (
+          <div className="p-4 text-center text-white/40 text-sm">لا توجد طلبات معلّقة</div>
+        )}
+        {resets.map((r) => (
+          <div key={r.id} className="p-3 flex items-center gap-3" data-testid={`reset-${r.id}`}>
+            <Mail size={14} className="text-gold-500" />
+            <div className="flex-1 min-w-0">
+              <div className="font-bold text-sm">{r.username} <span className="text-white/40 text-xs">• {r.email}</span></div>
+              <div className="text-[10px] text-white/40">
+                Token: <span className="text-gold-500 font-mono">{r.token}</span> • {new Date(r.created_at).toLocaleString("ar")}
+              </div>
+            </div>
+            <button onClick={() => complete(r.id)} className="px-3 py-1.5 rounded bg-gold-500/10 text-gold-500 text-xs hover:bg-gold-500/20">
+              تم الإرسال
+            </button>
+          </div>
+        ))}
+      </div>
+      <p className="text-[10px] text-white/40 mt-2">
+        ⚠️ ميزة الإيميل غير مُفعّلة بعد. أرسل الرابط يدويًا للاعب أو وفّر API key لخدمة Resend/SendGrid.
+      </p>
     </section>
   );
 }
@@ -181,6 +360,8 @@ export default function AdminPage() {
       )}
 
       <UserRoleManager />
+      <ClanEditor />
+      <PasswordResetsPanel />
       <BannerManager />
     </div>
   );

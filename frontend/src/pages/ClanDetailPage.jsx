@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { Shield, UserPlus, Swords, LogOut, Trash2, Sparkles } from "lucide-react";
+import { Shield, UserPlus, Swords, LogOut, Trash2, Sparkles, Power, Trophy } from "lucide-react";
 import { toast } from "sonner";
 import ChallengeModal from "../components/clan/ChallengeModal";
 import InviteModal from "../components/clan/InviteModal";
@@ -56,7 +56,7 @@ function Stat({ label, value, highlight }) {
   );
 }
 
-function ActionBar({ canJoin, isFull, isStaff, isMember, isLeader, onJoin, onChallenge, onInvite, onLeave, onDelete }) {
+function ActionBar({ canJoin, isFull, isStaff, isMember, isLeader, onJoin, onChallenge, onInvite, onLeave, onDelete, onArchive }) {
   return (
     <div className="mt-6 flex gap-2 flex-wrap">
       {canJoin && !isFull && (
@@ -85,11 +85,55 @@ function ActionBar({ canJoin, isFull, isStaff, isMember, isLeader, onJoin, onCha
         </button>
       )}
       {isLeader && (
-        <button onClick={onDelete} className="px-4 py-2 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10 flex items-center gap-2">
-          <Trash2 size={16} /> حذف الكلان
-        </button>
+        <>
+          <button data-testid="archive-clan-btn" onClick={onArchive} className="px-4 py-2 rounded-md border border-white/20 text-white/70 hover:bg-white/5 flex items-center gap-2">
+            <Power size={16} /> أرشفة الكلان (إيقاف)
+          </button>
+          <button onClick={onDelete} className="px-4 py-2 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10 flex items-center gap-2">
+            <Trash2 size={16} /> حذف الكلان
+          </button>
+        </>
       )}
     </div>
+  );
+}
+
+function TrophyRoom({ trophies }) {
+  if (!trophies || trophies.length === 0) {
+    return (
+      <section data-testid="trophy-room-empty" className="bg-surface border b-soft rounded-xl p-6">
+        <h2 className="font-display font-black text-2xl mb-2 flex items-center gap-2">
+          <Trophy className="text-gold-500" /> غرفة الكؤوس
+        </h2>
+        <p className="text-white/40 text-sm">لم يحقق هذا الكلان بطولات بعد. كن أول من يرفع الكأس!</p>
+      </section>
+    );
+  }
+  return (
+    <section data-testid="trophy-room" className="bg-surface border b-soft rounded-xl p-6">
+      <h2 className="font-display font-black text-2xl mb-4 flex items-center gap-2">
+        <Trophy className="text-gold-500" /> غرفة الكؤوس ({trophies.length})
+      </h2>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {trophies.map((t) => (
+          <div
+            key={t.id}
+            data-testid={`trophy-${t.id}`}
+            className="bg-gold-500/5 border border-gold-500/30 rounded-lg p-4 flex items-center gap-3"
+          >
+            <div className="h-12 w-12 rounded-md bg-gold-500/15 grid place-items-center text-gold-500">
+              <Trophy size={24} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-display font-black text-sm text-gold-500 truncate">{t.label}</div>
+              <div className="text-[10px] text-white/40 mt-1">
+                {t.kind === "league" ? "بطولة شهرية" : "بطولة"} • {new Date(t.awarded_at).toLocaleDateString("ar")}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -278,6 +322,17 @@ export default function ClanDetailPage() {
     window.location.href = "/clans";
   };
 
+  const archive = async () => {
+    // eslint-disable-next-line no-alert
+    if (!confirm("أرشفة الكلان؟ سيتم طرد جميع الأعضاء وإيقاف الكلان.")) return;
+    try {
+      await api.post(`/clans/${id}/archive`);
+      toast.success("تم إيقاف الكلان وطرد جميع الأعضاء");
+      await refresh();
+      window.location.href = "/clans";
+    } catch (err) { handleErr(err); }
+  };
+
   const challenge = async (e) => {
     e.preventDefault();
     if (!opponent) return toast.error("اختر خصماً");
@@ -333,7 +388,10 @@ export default function ClanDetailPage() {
         onInvite={() => setShowInvite(true)}
         onLeave={leave}
         onDelete={delClan}
+        onArchive={archive}
       />
+
+      <TrophyRoom trophies={clan.trophies || []} />
 
       <section>
         <h2 className="font-display font-black text-2xl mb-4">

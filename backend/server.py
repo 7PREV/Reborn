@@ -105,6 +105,9 @@ def sanitize_user(u: dict) -> dict:
         "is_plus": user_is_plus(u),
         "plus_expires_at": u.get("plus_expires_at"),
         "clan_cooldown_until": u.get("clan_cooldown_until"),
+        "twitch_url": u.get("twitch_url", ""),
+        "kick_url": u.get("kick_url", ""),
+        "tiktok_url": u.get("tiktok_url", ""),
         "created_at": u.get("created_at"),
     }
 
@@ -267,6 +270,39 @@ class RuleIn(BaseModel):
     order: int = 0
 
 
+class ProfileUpdateIn(BaseModel):
+    twitch_url: Optional[str] = ""
+    kick_url: Optional[str] = ""
+    tiktok_url: Optional[str] = ""
+    act: Optional[str] = None
+
+
+class AdminUserEditIn(BaseModel):
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+    act: Optional[str] = None
+
+
+class AdminClanEditIn(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=40)
+    tag: Optional[str] = Field(default=None, min_length=2, max_length=8)
+    description: Optional[str] = None
+
+
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+
+class BlacklistIn(BaseModel):
+    player_name: str = Field(min_length=2, max_length=80)
+    player_user_id: Optional[str] = None
+    player_email: Optional[str] = ""
+    cheat_tool: str = Field(min_length=1, max_length=120)
+    details: Optional[str] = ""
+    proof_image: Optional[str] = ""  # base64 data URL or upload URL
+
+
 # ---------------- Startup ----------------
 async def _cleanup_old_chat_messages() -> int:
     """Delete chat messages older than 24h + their video files. Returns count deleted."""
@@ -388,6 +424,8 @@ async def startup() -> None:
 
     # Start background cleanup task (24h chat messages + video files)
     asyncio.create_task(_periodic_cleanup_loop())
+    # Start monthly league rotation loop
+    asyncio.create_task(_league_rotation_loop())
 
 
 @app.on_event("shutdown")
@@ -523,11 +561,14 @@ async def create_clan(body: ClanCreateIn, user: dict = Depends(get_current_user)
 
 @api.get("/clans")
 async def list_clans(q: str = ""):
-    query = {}
+    query = {"archived": {"$ne": True}}
     if q:
-        query = {"$or": [
-            {"name": {"$regex": q, "$options": "i"}},
-            {"tag": {"$regex": q, "$options": "i"}},
+        query = {"$and": [
+            query,
+            {"$or": [
+                {"name": {"$regex": q, "$options": "i"}},
+                {"tag": {"$regex": q, "$options": "i"}},
+            ]},
         ]}
     clans = await db.clans.find(query, {"_id": 0}).sort("points", -1).to_list(100)
     return clans
@@ -733,6 +774,7 @@ async def create_challenge(clan_id: str, body: ChallengeIn, user: dict = Depends
     if body.opponent_clan_id == clan_id:
         raise HTTPException(400, "لا يمكن تحدي نفس الكلان")
     opponent = await _get_clan(body.opponent_clan_id)
+    await _check_match_pair_cooldown(clan_id, opponent["id"])
     existing = await db.challenges.find_one({
         "status": "pending",
         "$or": [
@@ -789,6 +831,7 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
         await db.challenges.update_one({"id": ch_id}, {"$set": {"status": "rejected"}})
         return {"ok": True, "status": "rejected"}
     # Accept → create live match
+    await _check_match_pair_cooldown(ch["challenger_clan_id"], ch["opponent_clan_id"])
     maps = [
         {"index": i, "vote_a": None, "vote_b": None, "winner": None,
          "disputed": False, "admin_resolved": False,
@@ -844,6 +887,39 @@ POINTS_WITHDRAW = -3
 
 GRACE_PERIOD_SECONDS = 10 * 60  # 10-minute grace period to claim a map win
 PRAYER_BREAK_SECONDS = 10 * 60  # 10-minute prayer break that pauses the grace timer
+MATCH_PAIR_COOLDOWN_HOURS = 3   # Same two clans cannot match within 3 hours
+
+
+async def _check_match_pair_cooldown(clan_a_id: str, clan_b_id: str) -> None:
+    """Raises 400 if the two clans have a match (live or finished) within the cooldown window."""
+    cutoff = iso(now_utc() - timedelta(hours=MATCH_PAIR_COOLDOWN_HOURS))
+    pair = {"$or": [
+        {"clan_a_id": clan_a_id, "clan_b_id": clan_b_id},
+        {"clan_a_id": clan_b_id, "clan_b_id": clan_a_id},
+    ]}
+    # Live match in progress is always a block
+    live = await db.matches.find_one({**pair, "status": "live"}, {"_id": 0, "id": 1, "created_at": 1})
+    if live:
+        raise HTTPException(400, "هناك مباراة جارية بالفعل بين الكلانين")
+    # Recent finished match
+    recent = await db.matches.find_one(
+        {**pair, "status": "finished", "finished_at": {"$gte": cutoff}},
+        {"_id": 0, "finished_at": 1},
+        sort=[("finished_at", -1)],
+    )
+    if recent:
+        try:
+            ends = datetime.fromisoformat(recent["finished_at"]) + timedelta(hours=MATCH_PAIR_COOLDOWN_HOURS)
+            remaining = (ends - now_utc()).total_seconds()
+            mins = max(1, int((remaining + 59) // 60))
+            hrs = mins // 60
+            rem_mins = mins % 60
+            label = f"{hrs} ساعة و{rem_mins} دقيقة" if hrs else f"{mins} دقيقة"
+            raise HTTPException(400, f"يجب الانتظار {label} قبل لعب مباراة جديدة بين الكلانين")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(400, "الكلانان في فترة انتظار 3 ساعات")
 
 # Video upload limits
 PLUS_VIDEO_MAX_BYTES = 500 * 1024 * 1024     # 500 MB
@@ -887,6 +963,9 @@ async def create_match(body: MatchCreateIn, user: dict = Depends(get_current_use
         raise HTTPException(400, "لا يمكن تحدي نفس الكلان")
     if not is_staff(user) and user["id"] not in (a["leader_id"], b["leader_id"]):
         raise HTTPException(403, "فقط المنظم أو قادة الكلانات")
+    # Staff may bypass the 3-hour pair cooldown (organizer override)
+    if not is_staff(user):
+        await _check_match_pair_cooldown(a["id"], b["id"])
     maps = [
         {"index": i, "vote_a": None, "vote_b": None, "winner": None,
          "disputed": False, "admin_resolved": False,
@@ -1384,7 +1463,8 @@ async def admin_chat_decision(msg_id: str, body: AdminMediaDecisionIn, user: dic
 @api.get("/leaderboard/clans")
 async def leaderboard_clans():
     docs = await db.clans.find(
-        {}, {"_id": 0, "id": 1, "name": 1, "tag": 1, "points": 1, "wins": 1, "losses": 1}
+        {"archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1, "tag": 1, "points": 1, "wins": 1, "losses": 1, "trophies": 1}
     ).sort("points", -1).limit(50).to_list(50)
     return docs
 
@@ -1460,6 +1540,7 @@ class TournamentCreateIn(BaseModel):
     description: Optional[str] = ""
     rules: Optional[str] = ""
     max_participants: int = Field(ge=2, le=16)  # 2,4,8,12,16
+    losers_bracket: bool = False  # Optional double-elim (UI flag)
 
 
 def _next_power_of_2(n: int) -> int:
@@ -1580,6 +1661,17 @@ async def _advance_tournament_winner(match: dict, winner_id: str) -> None:
             {"$set": {"bracket": tournament["bracket"], "status": "finished",
                       "champion_clan_id": winner_id, "finished_at": iso(now_utc())}}
         )
+        # Grant trophy to the champion clan
+        await db.clans.update_one(
+            {"id": winner_id},
+            {"$push": {"trophies": {
+                "id": str(uuid.uuid4()),
+                "kind": "tournament",
+                "label": f"بطل بطولة {tournament['name']}",
+                "tournament_id": tid,
+                "awarded_at": iso(now_utc()),
+            }}}
+        )
 
 
 @api.get("/tournaments")
@@ -1628,6 +1720,7 @@ async def create_tournament(body: TournamentCreateIn, user: dict = Depends(get_c
         "description": body.description or "",
         "rules": body.rules or "",
         "max_participants": body.max_participants,
+        "losers_bracket": bool(body.losers_bracket),
         "status": "registration",  # registration → live → finished
         "starts_at": iso(now),
         "plus_window_until": iso(now + timedelta(hours=24)),
@@ -1827,6 +1920,456 @@ async def upload_video(file: UploadFile = File(...), user: dict = Depends(get_cu
 @api.get("/")
 async def root():
     return {"message": "Rivals Esports API"}
+
+
+# ---------------- PROFILE / STREAMING URLS ----------------
+def _is_url(s: str) -> bool:
+    if not s:
+        return False
+    return s.startswith("http://") or s.startswith("https://")
+
+
+@api.put("/me/profile")
+async def update_my_profile(body: ProfileUpdateIn, user: dict = Depends(get_current_user)):
+    """Update Activision ID and streaming URLs for the logged-in user."""
+    update = {}
+    if body.act is not None:
+        v = body.act.strip()
+        if v and len(v) < 2:
+            raise HTTPException(400, "Activision ID قصير جدا")
+        update["act"] = v
+    for field in ("twitch_url", "kick_url", "tiktok_url"):
+        val = getattr(body, field)
+        if val is None:
+            continue
+        val = val.strip()
+        if val and not _is_url(val):
+            raise HTTPException(400, f"رابط {field} غير صالح")
+        update[field] = val
+    if update:
+        await db.users.update_one({"id": user["id"]}, {"$set": update})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return sanitize_user(fresh)
+
+
+# ---------------- LIVE STREAM DETECTION ----------------
+TWITCH_CLIENT_ID = os.environ.get("TWITCH_CLIENT_ID", "")
+TWITCH_CLIENT_SECRET = os.environ.get("TWITCH_CLIENT_SECRET", "")
+_twitch_token_cache: dict = {"token": None, "expires_at": None}
+
+
+def _extract_handle(url: str, hosts: list[str]) -> Optional[str]:
+    if not url:
+        return None
+    try:
+        # naive parse: split by "/" after host
+        lower = url.lower()
+        for h in hosts:
+            if h in lower:
+                tail = url.split(h, 1)[1].lstrip("/")
+                handle = tail.split("/")[0].split("?")[0].strip()
+                return handle or None
+        return None
+    except Exception:
+        return None
+
+
+async def _get_twitch_token() -> Optional[str]:
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        return None
+    cached = _twitch_token_cache.get("token")
+    exp = _twitch_token_cache.get("expires_at")
+    if cached and exp and now_utc() < exp:
+        return cached
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.post(
+                "https://id.twitch.tv/oauth2/token",
+                params={
+                    "client_id": TWITCH_CLIENT_ID,
+                    "client_secret": TWITCH_CLIENT_SECRET,
+                    "grant_type": "client_credentials",
+                },
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            _twitch_token_cache["token"] = data.get("access_token")
+            ttl = int(data.get("expires_in", 3600))
+            _twitch_token_cache["expires_at"] = now_utc() + timedelta(seconds=max(60, ttl - 60))
+            return _twitch_token_cache["token"]
+    except Exception as exc:
+        logger.warning(f"Twitch token error: {exc}")
+        return None
+
+
+async def _twitch_live_info(handle: str) -> Optional[dict]:
+    token = await _get_twitch_token()
+    if not token:
+        return None
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(
+                "https://api.twitch.tv/helix/streams",
+                params={"user_login": handle},
+                headers={"Client-Id": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"},
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json().get("data") or []
+            if not data:
+                return None
+            s = data[0]
+            thumb = s.get("thumbnail_url", "").replace("{width}", "320").replace("{height}", "180")
+            return {
+                "platform": "twitch",
+                "live": True,
+                "title": s.get("title", ""),
+                "viewer_count": s.get("viewer_count", 0),
+                "thumbnail": thumb,
+                "url": f"https://twitch.tv/{handle}",
+            }
+    except Exception as exc:
+        logger.warning(f"Twitch live check error: {exc}")
+        return None
+
+
+async def _kick_live_info(handle: str) -> Optional[dict]:
+    """Best-effort Kick.com live check via public unofficial endpoint."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5, headers={"User-Agent": "Mozilla/5.0"}) as c:
+            r = await c.get(f"https://kick.com/api/v2/channels/{handle}")
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            ls = data.get("livestream")
+            if not ls or not ls.get("is_live"):
+                return None
+            return {
+                "platform": "kick",
+                "live": True,
+                "title": ls.get("session_title", ""),
+                "viewer_count": ls.get("viewer_count", 0),
+                "thumbnail": (ls.get("thumbnail") or {}).get("url", ""),
+                "url": f"https://kick.com/{handle}",
+            }
+    except Exception as exc:
+        logger.warning(f"Kick live check error: {exc}")
+        return None
+
+
+@api.get("/users/{user_id}/live")
+async def user_live(user_id: str):
+    """Returns active live streams for a given user across linked platforms."""
+    u = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not u:
+        raise HTTPException(404, "غير موجود")
+    result = {"twitch": None, "kick": None, "tiktok": None}
+    th = _extract_handle(u.get("twitch_url", ""), ["twitch.tv/"])
+    kh = _extract_handle(u.get("kick_url", ""), ["kick.com/"])
+    if th:
+        result["twitch"] = await _twitch_live_info(th)
+    if kh:
+        result["kick"] = await _kick_live_info(kh)
+    # TikTok: link only — no live detection
+    if u.get("tiktok_url"):
+        result["tiktok"] = {"platform": "tiktok", "live": False, "url": u["tiktok_url"]}
+    return result
+
+
+@api.get("/matches/{match_id}/live-streams")
+async def match_live_streams(match_id: str, user: dict = Depends(get_current_user)):
+    """Returns active live streams for any leader/vice/member of the two clans in this match.
+    Used by the chat sidebar."""
+    m = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not m:
+        raise HTTPException(404, "غير موجود")
+    a = await db.clans.find_one({"id": m["clan_a_id"]}, {"_id": 0})
+    b = await db.clans.find_one({"id": m["clan_b_id"]}, {"_id": 0})
+    if not a or not b:
+        return []
+    member_ids = list(set(a.get("member_ids", []) + b.get("member_ids", [])))
+    docs = await db.users.find(
+        {"id": {"$in": member_ids},
+         "$or": [{"twitch_url": {"$ne": ""}}, {"kick_url": {"$ne": ""}}]},
+        {"_id": 0},
+    ).to_list(200)
+    streams = []
+    for u in docs:
+        live_data = await user_live(u["id"])
+        for k in ("twitch", "kick"):
+            v = live_data.get(k)
+            if v and v.get("live"):
+                streams.append({
+                    "user_id": u["id"],
+                    "username": u["username"],
+                    "clan_id": u.get("clan_id"),
+                    **v,
+                })
+    return streams
+
+
+# ---------------- CLAN ARCHIVE ----------------
+@api.post("/clans/{clan_id}/archive")
+async def archive_clan(clan_id: str, user: dict = Depends(get_current_user)):
+    """Leader (or staff) turns the clan OFF: kicks all members, deactivates clan."""
+    clan = await _get_clan(clan_id)
+    if user["id"] != clan["leader_id"] and not is_staff(user):
+        raise HTTPException(403, "فقط القائد أو المنظم")
+    if clan.get("archived"):
+        raise HTTPException(400, "الكلان مؤرشف بالفعل")
+    member_ids = clan.get("member_ids", [])
+    cooldown_until = iso(now_utc() + timedelta(hours=CLAN_LEAVE_COOLDOWN_HOURS))
+    if member_ids:
+        await db.users.update_many(
+            {"id": {"$in": member_ids}},
+            {"$set": {"clan_id": None, "clan_cooldown_until": cooldown_until}},
+        )
+    await db.clans.update_one(
+        {"id": clan_id},
+        {"$set": {
+            "archived": True,
+            "archived_at": iso(now_utc()),
+            "member_ids": [],
+            "vice_leader_ids": [],
+        }},
+    )
+    return {"ok": True, "kicked": len(member_ids)}
+
+
+# ---------------- ADMIN: edit users / clans, forgot-password ----------------
+@api.put("/admin/users/{user_id}")
+async def admin_edit_user(user_id: str, body: AdminUserEditIn, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(404, "المستخدم غير موجود")
+    if target.get("role") == "owner" and not is_owner(user):
+        raise HTTPException(403, "لا يمكن تعديل المالك")
+    update = {}
+    if body.username is not None:
+        v = body.username.strip()
+        if len(v) < 2:
+            raise HTTPException(400, "اسم المستخدم قصير")
+        clash = await db.users.find_one({"username": v, "id": {"$ne": user_id}})
+        if clash:
+            raise HTTPException(400, "الاسم محجوز")
+        update["username"] = v
+    if body.email is not None:
+        v = body.email.lower()
+        clash = await db.users.find_one({"email": v, "id": {"$ne": user_id}})
+        if clash:
+            raise HTTPException(400, "البريد مستخدم")
+        update["email"] = v
+    if body.password is not None:
+        update["password_hash"] = hash_pw(body.password)
+    if body.act is not None:
+        update["act"] = body.act.strip()
+    if update:
+        await db.users.update_one({"id": user_id}, {"$set": update})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0})
+    return sanitize_user(fresh)
+
+
+@api.put("/admin/clans/{clan_id}")
+async def admin_edit_clan(clan_id: str, body: AdminClanEditIn, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    await _get_clan(clan_id)  # 404 if missing
+    update = {}
+    if body.name is not None:
+        clash = await db.clans.find_one({"name": body.name, "id": {"$ne": clan_id}})
+        if clash:
+            raise HTTPException(400, "الاسم مستخدم")
+        update["name"] = body.name
+    if body.tag is not None:
+        clash = await db.clans.find_one({"tag": body.tag, "id": {"$ne": clan_id}})
+        if clash:
+            raise HTTPException(400, "التاج مستخدم")
+        update["tag"] = body.tag
+    if body.description is not None:
+        update["description"] = body.description
+    if update:
+        await db.clans.update_one({"id": clan_id}, {"$set": update})
+    fresh = await db.clans.find_one({"id": clan_id}, {"_id": 0})
+    return fresh
+
+
+@api.post("/auth/forgot-password")
+async def forgot_password(body: ForgotPasswordIn):
+    """MOCKED: Generates a reset link and stores it as a pending reset request.
+    Owner/Admins can view all pending requests in the dashboard.
+    NOTE: email delivery is NOT yet wired (waiting for SMTP/Resend API key)."""
+    email = body.email.lower()
+    user = await db.users.find_one({"email": email})
+    # Always return 200 so as not to leak account existence
+    if user:
+        token = uuid.uuid4().hex
+        await db.password_resets.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "email": email,
+            "username": user["username"],
+            "token": token,
+            "status": "pending",
+            "created_at": iso(now_utc()),
+            "expires_at": iso(now_utc() + timedelta(hours=24)),
+        })
+        logger.info(f"[FORGOT-PASSWORD MOCK] user={email} token={token}")
+    return {"ok": True, "message": "إن وُجد الحساب، سيتلقى الإدارة الطلب لإرسال الرابط"}
+
+
+@api.get("/admin/password-resets")
+async def admin_list_resets(user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    docs = await db.password_resets.find({"status": "pending"}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return docs
+
+
+@api.post("/admin/password-resets/{rid}/complete")
+async def admin_complete_reset(rid: str, user: dict = Depends(get_current_user)):
+    """Mark a reset request as 'sent/completed' once admin emails the user the link manually."""
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    await db.password_resets.update_one(
+        {"id": rid}, {"$set": {"status": "completed", "completed_at": iso(now_utc())}}
+    )
+    return {"ok": True}
+
+
+# ---------------- BLACKLIST (cheaters log) ----------------
+@api.get("/blacklist")
+async def list_blacklist(user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    docs = await db.blacklist.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return docs
+
+
+@api.post("/blacklist")
+async def add_blacklist(body: BlacklistIn, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    target_account = None
+    if body.player_user_id:
+        u = await db.users.find_one({"id": body.player_user_id}, {"_id": 0})
+        if u:
+            target_account = sanitize_user(u)
+    entry = {
+        "id": str(uuid.uuid4()),
+        "player_name": body.player_name,
+        "player_user_id": body.player_user_id,
+        "player_email": body.player_email or (target_account or {}).get("email", ""),
+        "player_account": target_account,
+        "cheat_tool": body.cheat_tool,
+        "details": body.details or "",
+        "proof_image": body.proof_image or "",
+        "added_by": user["id"],
+        "added_by_username": user["username"],
+        "created_at": iso(now_utc()),
+    }
+    await db.blacklist.insert_one(entry)
+    entry.pop("_id", None)
+    return entry
+
+
+@api.delete("/blacklist/{bid}")
+async def remove_blacklist(bid: str, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    await db.blacklist.delete_one({"id": bid})
+    return {"ok": True}
+
+
+# ---------------- MONTHLY LEAGUE (auto reset + trophy) ----------------
+_ARABIC_MONTHS = [
+    "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+    "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر",
+]
+
+
+def _current_league_key() -> str:
+    n = now_utc()
+    return f"{n.year}-{n.month:02d}"
+
+
+def _current_league_name() -> str:
+    n = now_utc()
+    return f"دوري رايفلز - {_ARABIC_MONTHS[n.month - 1]}"
+
+
+async def _ensure_current_league() -> dict:
+    """Returns the active league doc; creates it if missing. Closes previous month and grants
+    a trophy to the top-points clan."""
+    key = _current_league_key()
+    current = await db.leagues.find_one({"key": key}, {"_id": 0})
+    if current:
+        return current
+    # Close previous active league(s)
+    prev_cursor = db.leagues.find({"status": "active"}, {"_id": 0})
+    async for prev in prev_cursor:
+        # Champion = highest points clan at moment of close
+        top = await db.clans.find_one(
+            {"archived": {"$ne": True}}, {"_id": 0}, sort=[("points", -1)]
+        )
+        update_fields = {"status": "finished", "finished_at": iso(now_utc())}
+        if top:
+            update_fields["champion_clan_id"] = top["id"]
+            update_fields["champion_clan_name"] = top["name"]
+            await db.clans.update_one(
+                {"id": top["id"]},
+                {"$push": {"trophies": {
+                    "id": str(uuid.uuid4()),
+                    "kind": "league",
+                    "label": f"بطل {prev['name']}",
+                    "league_key": prev["key"],
+                    "awarded_at": iso(now_utc()),
+                }}}
+            )
+        await db.leagues.update_one({"key": prev["key"]}, {"$set": update_fields})
+        # Reset all clan points/wins/losses for the new league
+        await db.clans.update_many({}, {"$set": {"points": 0, "wins": 0, "losses": 0}})
+        await db.users.update_many({"role": {"$ne": "owner"}}, {"$set": {"points": 0}})
+    new_league = {
+        "id": str(uuid.uuid4()),
+        "key": key,
+        "name": _current_league_name(),
+        "status": "active",
+        "started_at": iso(now_utc()),
+        "finished_at": None,
+        "champion_clan_id": None,
+        "champion_clan_name": None,
+    }
+    await db.leagues.insert_one(new_league)
+    new_league.pop("_id", None)
+    logger.info(f"League created/rotated: {new_league['name']}")
+    return new_league
+
+
+@api.get("/leagues/current")
+async def current_league():
+    return await _ensure_current_league()
+
+
+@api.get("/leagues")
+async def list_leagues():
+    docs = await db.leagues.find({}, {"_id": 0}).sort("started_at", -1).to_list(50)
+    return docs
+
+
+async def _league_rotation_loop() -> None:
+    """Background task: checks every hour if a new month has started and rotates the league."""
+    while True:
+        try:
+            await _ensure_current_league()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"League rotation error: {exc}")
+        await asyncio.sleep(3600)
 
 
 app.include_router(api)

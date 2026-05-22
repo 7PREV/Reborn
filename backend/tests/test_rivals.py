@@ -421,13 +421,14 @@ def test_chat_write_blocked_for_outsiders(chat_match):
 
 
 # ---- Withdraw ----
-def test_withdraw_match(leader_a, leader_b):
+def test_withdraw_match(admin, leader_a, leader_b):
     """Leader A withdraws -> -3 for A, +3 for B, match finished."""
     ca = leader_a["clan"]
     cb = leader_b["clan"]
+    h_admin = {"Authorization": f"Bearer {admin['token']}"}
     h_a = {"Authorization": f"Bearer {leader_a['token']}"}
-    # Create fresh match
-    m = requests.post(f"{API}/matches", headers=h_a,
+    # Create fresh match via admin (bypasses 3h pair cooldown)
+    m = requests.post(f"{API}/matches", headers=h_admin,
                       json={"clan_a_id": ca["id"], "clan_b_id": cb["id"]})
     assert m.status_code == 200
     mid = m.json()["id"]
@@ -450,13 +451,101 @@ def test_withdraw_match(leader_a, leader_b):
     assert pts_b_after - pts_b_before == 3
 
 
-def test_withdraw_outsider_forbidden(leader_a, leader_b):
+def test_withdraw_outsider_forbidden(admin, leader_a, leader_b):
     ca = leader_a["clan"]
     cb = leader_b["clan"]
-    h_a = {"Authorization": f"Bearer {leader_a['token']}"}
-    m = requests.post(f"{API}/matches", headers=h_a,
+    h_admin = {"Authorization": f"Bearer {admin['token']}"}
+    m = requests.post(f"{API}/matches", headers=h_admin,
                       json={"clan_a_id": ca["id"], "clan_b_id": cb["id"]})
     mid = m.json()["id"]
     s, _u, t, _e = _register("outwithdraw")
     r = requests.post(f"{API}/matches/{mid}/withdraw", headers={"Authorization": f"Bearer {t}"})
     assert r.status_code == 403
+
+
+# ---- New launch features ----
+def test_act_required_for_register():
+    """Registration without `act` must fail with 422."""
+    r = requests.post(f"{API}/auth/register", json={
+        "email": f"noact_{uuid.uuid4().hex[:6]}@example.com",
+        "username": f"noact_{uuid.uuid4().hex[:5]}",
+        "password": "Pass@1234",
+    })
+    assert r.status_code == 422
+
+
+def test_forgot_password_creates_admin_request(admin):
+    """Forgot-password always returns 200, and admin sees the pending reset."""
+    s, u, t, _ = _register("forgot")
+    r = requests.post(f"{API}/auth/forgot-password", json={"email": u["email"]})
+    assert r.status_code == 200
+    h = {"Authorization": f"Bearer {admin['token']}"}
+    resets = requests.get(f"{API}/admin/password-resets", headers=h).json()
+    assert any(x["user_id"] == u["id"] for x in resets)
+
+
+def test_current_league_arabic_name():
+    r = requests.get(f"{API}/leagues/current")
+    assert r.status_code == 200
+    name = r.json().get("name", "")
+    assert "دوري رايفلز" in name
+
+
+def test_blacklist_crud(admin):
+    h = {"Authorization": f"Bearer {admin['token']}"}
+    entry = requests.post(f"{API}/blacklist", headers=h, json={
+        "player_name": "TestCheater",
+        "cheat_tool": "Aimbot",
+        "details": "Caught using aimbot in BO3 finals",
+    })
+    assert entry.status_code == 200
+    bid = entry.json()["id"]
+    items = requests.get(f"{API}/blacklist", headers=h).json()
+    assert any(x["id"] == bid for x in items)
+    d = requests.delete(f"{API}/blacklist/{bid}", headers=h)
+    assert d.status_code == 200
+
+
+def test_blacklist_player_forbidden():
+    s, u, t, _ = _register("blperm")
+    h = {"Authorization": f"Bearer {t}"}
+    r = requests.get(f"{API}/blacklist", headers=h)
+    assert r.status_code == 403
+
+
+def test_admin_can_edit_user(admin):
+    s, u, t, _ = _register("adedit")
+    h_admin = {"Authorization": f"Bearer {admin['token']}"}
+    new_act = f"NEW_ACT_{uuid.uuid4().hex[:5]}"
+    r = requests.put(f"{API}/admin/users/{u['id']}", headers=h_admin, json={"act": new_act})
+    assert r.status_code == 200
+    assert r.json()["act"] == new_act
+
+
+def test_clan_archive_kicks_members(admin):
+    """Archive clan endpoint deactivates clan and kicks all members."""
+    s_l, u_l, t_l, _ = _register("arch_l")
+    s_m, u_m, t_m, _ = _register("arch_m")
+    h_l = {"Authorization": f"Bearer {t_l}"}
+    h_m = {"Authorization": f"Bearer {t_m}"}
+    # Create clan
+    cr = requests.post(f"{API}/clans", headers=h_l, json={
+        "name": f"ArchClan_{uuid.uuid4().hex[:6]}",
+        "tag": f"AR{uuid.uuid4().hex[:3]}",
+        "description": "x",
+    })
+    assert cr.status_code == 200
+    cid = cr.json()["id"]
+    # Member joins via accepted request
+    requests.post(f"{API}/clans/{cid}/join-request", headers=h_m)
+    reqs = requests.get(f"{API}/clans/{cid}/requests", headers=h_l).json()
+    req_id = reqs[0]["id"]
+    requests.post(f"{API}/clans/{cid}/requests/{req_id}", headers=h_l, json={"action": "accept"})
+    # Archive
+    a = requests.post(f"{API}/clans/{cid}/archive", headers=h_l)
+    assert a.status_code == 200
+    # Member should have no clan now
+    me = requests.get(f"{API}/auth/me", headers=h_m).json()
+    assert me["clan_id"] is None
+    # Member is in cooldown
+    assert me.get("clan_cooldown_until")

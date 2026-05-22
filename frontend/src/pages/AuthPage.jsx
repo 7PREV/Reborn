@@ -25,7 +25,7 @@ export default function AuthPage() {
       } else {
         await register({ email, password, username, act });
       }
-      toast.success("مرحباً بك في Arena");
+      toast.success("مرحباً بك في Rivals");
       navigate("/");
     } catch (err) {
       const msg = formatApiErrorDetail(err.response?.data?.detail) || err.message;
@@ -133,7 +133,7 @@ export default function AuthPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
-                placeholder="you@arena.gg"
+                placeholder="you@rivals.gg"
               />
             </div>
             <div>
@@ -166,6 +166,26 @@ export default function AuthPage() {
             >
               {loading ? "..." : tab === "login" ? "دخول" : "إنشاء الحساب"}
             </button>
+
+            {tab === "login" && (
+              <button
+                data-testid="forgot-password-btn"
+                type="button"
+                onClick={async () => {
+                  if (!email) { setError("اكتب بريدك الإلكتروني أولاً"); return; }
+                  try {
+                    const apiMod = await import("../api");
+                    await apiMod.default.post("/auth/forgot-password", { email });
+                    toast.success("تم إرسال طلب استعادة كلمة المرور. سيتواصل معك المنظم قريباً.");
+                  } catch (err) {
+                    setError(err.response?.data?.detail || "فشل الإرسال");
+                  }
+                }}
+                className="w-full text-xs text-gold-500/80 hover:text-gold-500 underline-offset-4 hover:underline"
+              >
+                نسيت كلمة المرور؟
+              </button>
+            )}
           </form>
 
           <div className="my-6 flex items-center gap-3 text-white/30 text-xs">

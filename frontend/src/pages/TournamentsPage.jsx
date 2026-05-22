@@ -16,7 +16,7 @@ function StatusBadge({ status }) {
 }
 
 function CreateTournamentModal({ onClose, onCreated }) {
-  const [form, setForm] = useState({ name: "", description: "", rules: "", max_participants: 8 });
+  const [form, setForm] = useState({ name: "", description: "", rules: "", max_participants: 8, losers_bracket: false });
   const submit = async (e) => {
     e.preventDefault();
     try {
@@ -62,6 +62,16 @@ function CreateTournamentModal({ onClose, onCreated }) {
             {[2, 4, 8, 12, 16].map((n) => <option key={n} value={n}>{n} كلان</option>)}
           </select>
         </div>
+        <label className="flex items-center gap-2 cursor-pointer text-sm">
+          <input
+            data-testid="t-losers-bracket"
+            type="checkbox"
+            checked={form.losers_bracket}
+            onChange={(e) => setForm({ ...form, losers_bracket: e.target.checked })}
+            className="accent-gold-500 h-4 w-4"
+          />
+          <span>تفعيل نظام الفرصة الثانية (Losers Bracket)</span>
+        </label>
         <p className="text-xs text-white/50">أول 24 ساعة: تسجيل الكلانات Plus فقط، ثم يفتح للجميع.</p>
         <div className="flex gap-2 justify-end">
           <button type="button" onClick={onClose} className="px-4 py-2 rounded-md hover:bg-white/5">إلغاء</button>

@@ -1,0 +1,51 @@
+{
+  "summary": "Iteration 3: Verified the huge launch batch (clan challenges, 3h pair cooldown + admin override, map timers grace/prayer, archive + 2h cooldown, leave cooldown, admin user/clan edits, forgot-password admin flow, monthly Arabic league, leaderboard, blacklist with proof, tournaments losers_bracket, live streams, profile streaming URLs, RIVALS branding). Added 15 new pytest cases in test_rivals_launch.py and they all pass alongside the 29 pre-existing tests in test_rivals.py — 44/44 pytest green. Playwright smoke verified AuthPage (RIVALS branding, no 'Arena', forgot-password button, Activision ID input on register tab), AdminPage (login works, dispute list rendered, Blacklist nav link present), BlacklistPage (player-name/cheat-tool/details/proof file inputs visible), TournamentsPage (create modal contains 'الفرصة الثانية' losers_bracket checkbox), and ProfilePage at /me (ACT input + Twitch/Kick/TikTok URL inputs + Save button + Plus toggle).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/leaderboard/clans",
+        "issue": "trophies field is only present on clan documents that ever pushed to the trophies array. Mongo projection {'trophies':1} silently omits the key for older clans. Frontend should default to []."
+      },
+      {
+        "endpoint": "POST /api/matches/{id}/maps/{idx}/grace",
+        "issue": "Response shape stores grace_started_at + grace_started_by_clan but no grace_ends_at field — clients must compute (started_at + 10min - prayer-extension) themselves. The 'maps/timer' GET endpoint exposes ends_at but the mutating endpoints do not. Acceptable but worth documenting."
+      },
+      {
+        "endpoint": "POST /api/tournaments",
+        "issue": "Requires max_participants (2..16). Frontend modal must validate this client-side."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_rivals.py",
+    "/app/backend/tests/test_rivals_launch.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional: have backend expose grace_ends_at directly in /maps/{idx}/grace response to avoid duplicate clock math in frontend.",
+    "Optional: leaderboard endpoint could $ifNull trophies to [] for consistent response shape.",
+    "Live Twitch detection returns gracefully (null) since TWITCH_CLIENT_ID/SECRET env keys not yet provided — this is expected per the request, no action needed."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 2388 lines — strongly recommend splitting into routers (auth, clans, matches, challenges, blacklist, tournaments, admin) before more features ship.",
+    "Tag uniqueness is case-sensitive in /api/admin/clans/{id} edit — a clan with tag 'RNM' cannot be re-assigned 'RNM' if another already owns it; surfacing 'التاج مستخدم' is good but consider scoped uniqueness check that ignores the current clan's own tag.",
+    "Challenge create endpoint URL parameter clan_id == challenger's own clan is non-obvious; consider renaming to /api/challenges with body {challenger_id, opponent_id} for clarity, or document in OpenAPI description.",
+    "Frontend ProfilePage route is /me; the request originally referenced 'ProfilePage' which suggested /profile. Either alias both routes or update docs/tests."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_rivals_launch.py (new — 15 tests)"
+  ],
+  "success_rate": {"backend": "100% (44/44 pytest)", "frontend": "100% (auth/register/admin/blacklist/tournaments/profile pages all render with required data-testids and Arabic copy)"},
+  "test_credentials": "admin@rivals.gg / Admin@12345 (verified). Owner: prev@rivals.gg / Prev@Rivals2026 (not exercised this iteration). New users registered via /api/auth/register must include `act`.",
+  "seed_data_creation": "Tests created TEST_* clans and lb_* users via /api/auth/register; ~15 additional users + clans persisted in db (cleanup not aggressive).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend launch tests at /app/backend/tests/test_rivals_launch.py. Together with test_rivals.py = 44 tests. Profile page is /me (not /profile). Challenge endpoint expects clan_id in URL = challenger's OWN clan id, with body {opponent_clan_id, notes}. Tournament POST requires max_participants. Grace timer response uses grace_started_at + grace_started_by_clan (no grace_ends_at in mutating response — GET maps/timer exposes ends_at).",
+  "rca of the issue": "n/a — no blocking bugs. The initial 6 launch test failures were test-contract mismatches (wrong challenge endpoint URL, missing tournament.max_participants, wrong grace field names, hard tag collision in admin clan edit). All fixed in the test file; backend behaviour matches spec."
+}
