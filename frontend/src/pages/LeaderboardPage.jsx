@@ -39,47 +39,55 @@ export default function LeaderboardPage() {
             <tr>
               <th className="py-3 px-4 w-16">#</th>
               <th className="py-3 px-4">{tab === "clans" ? "الكلان" : "اللاعب"}</th>
-              {tab === "clans" && <th className="py-3 px-4">فوز / خسارة</th>}
+              <th className="py-3 px-4">فوز / خسارة</th>
+              <th className="py-3 px-4 w-20 text-center">W/L</th>
               <th className="py-3 px-4 text-end w-32">النقاط</th>
             </tr>
           </thead>
           <tbody>
-            {data.map((row, idx) => (
-              <tr key={row.id} data-testid={`lb-row-${idx}`} className="border-t b-soft hover:bg-white/[0.03] transition">
-                <td className="py-3 px-4">
-                  <div className={`inline-grid place-items-center h-8 w-8 rounded-md font-display font-black ${
-                    idx === 0 ? "bg-gold-500 text-black" :
-                    idx === 1 ? "bg-slate-300 text-black" :
-                    idx === 2 ? "bg-amber-700 text-white" :
-                    "bg-white/5 text-white/60"
-                  }`}>{idx + 1}</div>
-                </td>
-                <td className="py-3 px-4">
-                  {tab === "clans" ? (
-                    <Link to={`/clans/${row.id}`} className="flex items-center gap-3 hover:text-gold-500">
-                      <Shield size={18} className="text-gold-500/70" />
-                      <span className="font-bold">{row.name}</span>
-                      <span className="text-xs text-white/40">[{row.tag}]</span>
-                    </Link>
-                  ) : (
-                    <div className="flex items-center gap-3">
-                      <div className="h-8 w-8 rounded bg-white/5 grid place-items-center text-gold-500 font-display">{row.username[0].toUpperCase()}</div>
-                      <span className="font-bold">{row.username}</span>
-                    </div>
-                  )}
-                </td>
-                {tab === "clans" && (
-                  <td className="py-3 px-4 text-white/70">
-                    <span className="text-emerald-400">{row.wins || 0}</span>
-                    <span className="text-white/30 mx-1">/</span>
-                    <span className="text-destructive">{row.losses || 0}</span>
+            {data.map((row, idx) => {
+              const wins = row.wins || 0;
+              const losses = row.losses || 0;
+              const kd = row.kd != null ? row.kd : (losses === 0 ? wins.toFixed(2) : (wins / losses).toFixed(2));
+              const isPlus = tab === "clans" ? row.is_plus : row.is_personal_plus;
+              return (
+                <tr key={row.id} data-testid={`lb-row-${idx}`} className="border-t b-soft hover:bg-white/[0.03] transition">
+                  <td className="py-3 px-4">
+                    <div className={`inline-grid place-items-center h-8 w-8 rounded-md font-display font-black ${
+                      idx === 0 ? "bg-gold-500 text-black" :
+                      idx === 1 ? "bg-slate-300 text-black" :
+                      idx === 2 ? "bg-amber-700 text-white" :
+                      "bg-white/5 text-white/60"
+                    }`}>{idx + 1}</div>
                   </td>
-                )}
-                <td className="py-3 px-4 text-end font-display font-black text-gold-500">{row.points}</td>
-              </tr>
-            ))}
+                  <td className="py-3 px-4">
+                    {tab === "clans" ? (
+                      <Link to={`/clans/${row.id}`} className={`inline-flex items-center gap-3 hover:text-gold-500 ${isPlus ? "plus-glow rounded-md px-2 py-1" : ""}`}>
+                        <Shield size={18} className="text-gold-500/70" />
+                        <span className="font-bold">{row.name}</span>
+                        <span className="text-xs text-white/40">[{row.tag}]</span>
+                        {isPlus && <Crown size={12} className="text-gold-500" />}
+                      </Link>
+                    ) : (
+                      <Link to={`/players/${row.id}`} data-testid={`lb-player-${row.id}`} className={`inline-flex items-center gap-3 hover:text-gold-500 ${isPlus ? "plus-glow rounded-md px-2 py-1" : ""}`}>
+                        <div className="h-8 w-8 rounded bg-white/5 grid place-items-center text-gold-500 font-display">{row.username[0].toUpperCase()}</div>
+                        <span className="font-bold">{row.username}</span>
+                        {isPlus && <Crown size={12} className="text-gold-500" />}
+                      </Link>
+                    )}
+                  </td>
+                  <td className="py-3 px-4 text-white/70">
+                    <span className="text-emerald-400">{wins}</span>
+                    <span className="text-white/30 mx-1">/</span>
+                    <span className="text-destructive">{losses}</span>
+                  </td>
+                  <td className="py-3 px-4 text-center font-mono text-gold-500">{kd}</td>
+                  <td className="py-3 px-4 text-end font-display font-black text-gold-500">{row.points}</td>
+                </tr>
+              );
+            })}
             {data.length === 0 && (
-              <tr><td colSpan={4} className="py-12 text-center text-white/40">لا توجد بيانات</td></tr>
+              <tr><td colSpan={5} className="py-12 text-center text-white/40">لا توجد بيانات</td></tr>
             )}
           </tbody>
         </table>

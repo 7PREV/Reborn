@@ -278,6 +278,7 @@ class RegisterIn(BaseModel):
     username: str = Field(min_length=2, max_length=30)
     password: str = Field(min_length=6, max_length=128)
     act: str = Field(min_length=2, max_length=40)  # In-game COD name
+    accepted_terms: bool = False
 
 
 class LoginIn(BaseModel):
@@ -336,9 +337,10 @@ class OpponentImageDecisionIn(BaseModel):
 
 
 class RuleIn(BaseModel):
-    title: str
-    body: str
+    title: str = Field(min_length=1, max_length=140)
+    body: str = Field(min_length=1)
     order: int = 0
+    image: Optional[str] = ""  # base64 data URL or external link
 
 
 class ProfileUpdateIn(BaseModel):
@@ -510,6 +512,8 @@ async def shutdown() -> None:
 # ---------------- AUTH ----------------
 @api.post("/auth/register")
 async def register(body: RegisterIn, response: Response):
+    if not body.accepted_terms:
+        raise HTTPException(400, "يجب الموافقة على الشروط والأحكام وسياسة الخصوصية قبل التسجيل")
     email = body.email.lower()
     if await db.users.find_one({"email": email}):
         raise HTTPException(400, "البريد مسجل من قبل")
@@ -946,6 +950,11 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
         {"id": ch_id}, {"$set": {"status": "accepted", "match_id": m["id"]}}
     )
     m.pop("_id", None)
+    asyncio.create_task(_send_discord_embed(
+        title=f"🔴 Match Started: {ch['challenger_name']} [{ch['challenger_tag']}] vs {ch['opponent_name']} [{ch['opponent_tag']}]",
+        description="تم قبول التحدي — البطولة تشتعل!",
+        color=0xFF3344,
+    ))
     return {"ok": True, "status": "accepted", "match": await _enrich_match(m)}
 
 
@@ -1010,7 +1019,7 @@ async def _check_match_pair_cooldown(clan_a_id: str, clan_b_id: str) -> None:
 
 # Video upload limits
 PLUS_VIDEO_MAX_BYTES = 500 * 1024 * 1024     # 500 MB
-FREE_VIDEO_MAX_BYTES = 100 * 1024 * 1024     # 100 MB
+FREE_VIDEO_MAX_BYTES = 80 * 1024 * 1024      # 80 MB
 UPLOAD_DIR = ROOT_DIR / "uploads" / "videos"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1084,6 +1093,11 @@ async def create_match(body: MatchCreateIn, user: dict = Depends(get_current_use
     }
     await db.matches.insert_one(m)
     m.pop("_id", None)
+    asyncio.create_task(_send_discord_embed(
+        title=f"🔴 Match Started: {a['name']} [{a['tag']}] vs {b['name']} [{b['tag']}]",
+        description="BO3 • Call of Duty — المباراة بدأت، تابع الشات الحي للحصول على آخر التحديثات!",
+        color=0xFF3344,
+    ))
     return await _enrich_match(m)
 
 
@@ -1591,6 +1605,103 @@ async def leaderboard_players():
     return [sanitize_user(d) for d in docs]
 
 
+# ---------------- DISCORD WEBHOOK (community notifications) ----------------
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+
+
+async def _send_discord_embed(title: str, description: str, color: int = 0xFFCC00, fields: Optional[list] = None) -> None:
+    """Fire-and-forget Discord webhook. Silent no-op when env var is missing."""
+    if not DISCORD_WEBHOOK_URL:
+        return
+    import httpx
+    payload = {
+        "embeds": [{
+            "title": title[:240],
+            "description": description[:2000],
+            "color": color,
+            "timestamp": iso(now_utc()),
+            "fields": fields or [],
+            "footer": {"text": "RIVALS COD LEAGUE"},
+        }]
+    }
+    try:
+        async with httpx.AsyncClient(timeout=4) as c:
+            await c.post(DISCORD_WEBHOOK_URL, json=payload)
+    except Exception as exc:
+        logger.warning(f"Discord webhook error: {exc}")
+
+
+# ---------------- OWNER-ONLY: manual Plus grant/revoke ----------------
+class PlusGrantIn(BaseModel):
+    action: Literal["grant", "revoke"]
+    days: int = Field(default=30, ge=1, le=3650)
+
+
+@api.post("/admin/users/{user_id}/personal-plus")
+async def owner_set_personal_plus(user_id: str, body: PlusGrantIn, user: dict = Depends(get_current_user)):
+    """Owner-only: grant or revoke Personal Plus instantly (bypasses payment)."""
+    if not is_owner(user):
+        raise HTTPException(403, "صلاحية المالك فقط")
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(404, "المستخدم غير موجود")
+    if body.action == "grant":
+        new_until = iso(now_utc() + timedelta(days=body.days))
+        await db.users.update_one({"id": user_id}, {"$set": {"personal_plus_until": new_until}})
+        return {"ok": True, "personal_plus_until": new_until}
+    await db.users.update_one({"id": user_id}, {"$set": {"personal_plus_until": None}})
+    return {"ok": True, "personal_plus_until": None}
+
+
+@api.post("/admin/clans/{clan_id}/plus")
+async def owner_set_clan_plus(clan_id: str, body: PlusGrantIn, user: dict = Depends(get_current_user)):
+    """Owner-only: grant or revoke Clan Plus (sets the leader's plus_expires_at + flags clan)."""
+    if not is_owner(user):
+        raise HTTPException(403, "صلاحية المالك فقط")
+    clan = await _get_clan(clan_id)
+    if body.action == "grant":
+        new_until = iso(now_utc() + timedelta(days=body.days))
+        await db.clans.update_one(
+            {"id": clan_id},
+            {"$set": {"plus_until": new_until, "is_plus": True}},
+        )
+        await db.users.update_one(
+            {"id": clan["leader_id"]},
+            {"$set": {"plus_expires_at": new_until}},
+        )
+        return {"ok": True, "plus_until": new_until}
+    await db.clans.update_one(
+        {"id": clan_id},
+        {"$set": {"plus_until": None, "is_plus": False}},
+    )
+    return {"ok": True, "plus_until": None}
+
+
+# ---------------- HEAD-TO-HEAD (clan rivalry record) ----------------
+@api.get("/matches/{match_id}/h2h")
+async def head_to_head(match_id: str):
+    """Returns lifetime H2H record between the two clans of this match."""
+    m = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not m:
+        raise HTTPException(404, "غير موجود")
+    a_id, b_id = m["clan_a_id"], m["clan_b_id"]
+    pair = {"$or": [
+        {"clan_a_id": a_id, "clan_b_id": b_id},
+        {"clan_a_id": b_id, "clan_b_id": a_id},
+    ], "status": "finished"}
+    docs = await db.matches.find(pair, {"_id": 0, "winner_clan_id": 1, "finished_at": 1}).sort("finished_at", -1).to_list(200)
+    a_wins = sum(1 for d in docs if d.get("winner_clan_id") == a_id)
+    b_wins = sum(1 for d in docs if d.get("winner_clan_id") == b_id)
+    a = await db.clans.find_one({"id": a_id}, {"_id": 0, "name": 1, "tag": 1, "id": 1})
+    b = await db.clans.find_one({"id": b_id}, {"_id": 0, "name": 1, "tag": 1, "id": 1})
+    return {
+        "clan_a": a, "clan_b": b,
+        "a_wins": a_wins, "b_wins": b_wins,
+        "total": len(docs),
+        "last_match_at": docs[0]["finished_at"] if docs else None,
+    }
+
+
 # ---------------- RULES ----------------
 @api.get("/rules")
 async def list_rules():
@@ -1849,6 +1960,12 @@ async def create_tournament(body: TournamentCreateIn, user: dict = Depends(get_c
     }
     await db.tournaments.insert_one(t)
     t.pop("_id", None)
+    # Discord notification (fire-and-forget)
+    asyncio.create_task(_send_discord_embed(
+        title=f"🏆 بطولة جديدة مفتوحة للتسجيل: {body.name}",
+        description=f"{body.description or ''}\n\n**عدد الكلانات:** {body.max_participants}\n**24 ساعة الأولى:** Plus فقط",
+        color=0xFFCC00,
+    ))
     return await _enrich_tournament(t)
 
 

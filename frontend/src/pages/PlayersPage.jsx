@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import api from "../api";
-import { Search, User } from "lucide-react";
+import { Search, Sparkles } from "lucide-react";
 
 export default function PlayersPage() {
   const [users, setUsers] = useState([]);
@@ -30,16 +31,28 @@ export default function PlayersPage() {
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {users.map((u) => (
-          <div key={u.id} data-testid={`player-${u.id}`} className="bg-surface border b-soft rounded-lg p-4 flex items-center gap-3 fade-in">
-            <div className="h-12 w-12 rounded-md bg-gold-500/10 text-gold-500 grid place-items-center font-display font-black text-lg">
-              {u.username[0].toUpperCase()}
+          <Link
+            key={u.id}
+            to={`/players/${u.id}`}
+            data-testid={`player-${u.id}`}
+            className={`bg-surface border b-soft rounded-lg p-4 flex items-center gap-3 fade-in hover:border-gold-500/40 transition ${u.is_personal_plus ? "plus-glow" : ""}`}
+          >
+            <div className="h-12 w-12 rounded-md bg-gold-500/10 text-gold-500 grid place-items-center font-display font-black text-lg overflow-hidden">
+              {u.is_personal_plus && u.avatar ? (
+                <img src={u.avatar} alt={u.username} className="h-full w-full object-cover" />
+              ) : (u.username[0] || "?").toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="font-bold truncate">{u.username}</div>
-              <div className="text-xs text-white/40 truncate">{u.role === "admin" ? "منظم" : u.clan_id ? "في كلان" : "حر"}</div>
+              <div className="font-bold truncate flex items-center gap-1">
+                {u.username}
+                {u.is_personal_plus && <Sparkles size={11} className="text-gold-500" />}
+              </div>
+              <div className="text-xs text-white/40 truncate">
+                {u.role === "owner" ? "مالك" : u.role === "admin" ? "منظم" : u.clan_id ? "في كلان" : "حر"}
+              </div>
             </div>
             <div className="text-gold-500 font-display font-black">{u.points}</div>
-          </div>
+          </Link>
         ))}
         {users.length === 0 && <div className="col-span-full text-center text-white/40 py-12">لا توجد نتائج</div>}
       </div>

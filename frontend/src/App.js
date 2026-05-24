@@ -16,6 +16,7 @@ import TournamentsPage from "./pages/TournamentsPage";
 import TournamentDetailPage from "./pages/TournamentDetailPage";
 import BlacklistPage from "./pages/BlacklistPage";
 import PersonalPlusPage from "./pages/PersonalPlusPage";
+import PlayerProfilePage from "./pages/PlayerProfilePage";
 import { Toaster } from "sonner";
 
 function Protected({ children }) {
@@ -41,6 +42,7 @@ function AppRoutes() {
       <Route path="/clans/:id" element={<PublicShell><ClanDetailPage /></PublicShell>} />
       <Route path="/matches" element={<PublicShell><MatchesPage /></PublicShell>} />
       <Route path="/players" element={<PublicShell><PlayersPage /></PublicShell>} />
+      <Route path="/players/:id" element={<PublicShell><PlayerProfilePage /></PublicShell>} />
       <Route path="/leaderboard" element={<PublicShell><LeaderboardPage /></PublicShell>} />
       <Route path="/rules" element={<PublicShell><RulesPage /></PublicShell>} />
       <Route path="/tournaments" element={<PublicShell><TournamentsPage /></PublicShell>} />

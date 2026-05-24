@@ -18,6 +18,7 @@ def _register(suffix):
         "username": f"tu_{suffix}_{uuid.uuid4().hex[:5]}",
         "password": "Pass@1234",
         "act": f"COD_{suffix}",
+        "accepted_terms": True,
     })
     assert r.status_code == 200, r.text
     return s, r.json()["user"], r.json()["token"], email
@@ -470,8 +471,20 @@ def test_act_required_for_register():
         "email": f"noact_{uuid.uuid4().hex[:6]}@example.com",
         "username": f"noact_{uuid.uuid4().hex[:5]}",
         "password": "Pass@1234",
+        "accepted_terms": True,
     })
     assert r.status_code == 422
+
+
+def test_register_requires_terms_acceptance():
+    r = requests.post(f"{API}/auth/register", json={
+        "email": f"noterms_{uuid.uuid4().hex[:6]}@example.com",
+        "username": f"noterms_{uuid.uuid4().hex[:5]}",
+        "password": "Pass@1234",
+        "act": "ACT_TERMS",
+    })
+    assert r.status_code == 400
+    assert "الشروط" in r.json().get("detail", "")
 
 
 def test_forgot_password_creates_admin_request(admin):

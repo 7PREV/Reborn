@@ -8,13 +8,13 @@ export default function Layout({ children }) {
 
   const nav = [
     { to: "/", label: "الرئيسية", icon: HomeIcon, id: "nav-home" },
-    { to: "/plus", label: "Personal Plus", icon: Sparkles, id: "nav-plus" },
     { to: "/tournaments", label: "البطولات", icon: Award, id: "nav-tournaments" },
     { to: "/matches", label: "المباريات", icon: Swords, id: "nav-matches" },
     { to: "/clans", label: "الكلانات", icon: Shield, id: "nav-clans" },
     { to: "/players", label: "اللاعبون", icon: Users, id: "nav-players" },
     { to: "/leaderboard", label: "النتائج", icon: Trophy, id: "nav-leaderboard" },
     { to: "/rules", label: "القوانين", icon: ScrollText, id: "nav-rules" },
+    { to: "/plus", label: "PLUS", icon: Sparkles, id: "nav-plus" },
     { to: "/blacklist", label: "القائمة السوداء", icon: ShieldOff, id: "nav-blacklist" },
   ];
 
@@ -139,11 +139,59 @@ export default function Layout({ children }) {
 
       <main className="container py-8">{children}</main>
 
-      <footer className="border-t b-soft py-8 mt-12">
-        <div className="container text-center text-xs text-white/40 uppercase tracking-widest">
-          RIVALS — دوري Call of Duty
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
+  );
+}
+
+function SiteFooter() {
+  const links = [
+    { label: "Discord", href: "https://discord.gg/rivals", testid: "footer-discord" },
+    { label: "Instagram", href: "https://instagram.com/rivals.gg", testid: "footer-instagram" },
+    { label: "TikTok", href: "https://tiktok.com/@rivals.gg", testid: "footer-tiktok" },
+    { label: "Support", href: "mailto:support@rivals.gg", testid: "footer-support" },
+  ];
+  return (
+    <footer className="border-t b-soft mt-12 bg-surface/40" data-testid="site-footer">
+      <div className="container py-10 grid md:grid-cols-3 gap-8">
+        <div>
+          <div className="font-display font-black text-xl text-gold-500">RIVALS</div>
+          <p className="text-xs text-white/50 mt-2 leading-relaxed">
+            دوري Call of Duty العربي. كلانات، بطولات، شات مباشر — كل شيء تحتاجه في مكان واحد.
+          </p>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-widest text-white/40 mb-3">روابط مفيدة</div>
+          <ul className="space-y-1.5 text-sm">
+            <li><a href="/rules" className="text-white/70 hover:text-gold-500">القوانين</a></li>
+            <li><a href="/plus" className="text-white/70 hover:text-gold-500">PLUS</a></li>
+            <li><a href="/blacklist" className="text-white/70 hover:text-gold-500">القائمة السوداء</a></li>
+          </ul>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-widest text-white/40 mb-3">تابعنا</div>
+          <div className="flex flex-wrap gap-2">
+            {links.map((l) => (
+              <a
+                key={l.label}
+                href={l.href}
+                target="_blank"
+                rel="noreferrer"
+                data-testid={l.testid}
+                className="px-3 py-1.5 rounded-md border b-soft hover:border-gold-500/40 text-xs text-white/70 hover:text-gold-500"
+              >
+                {l.label}
+              </a>
+            ))}
+          </div>
+          <a href="mailto:support@rivals.gg" className="block text-[11px] text-white/40 mt-3 hover:text-gold-500">
+            support@rivals.gg
+          </a>
+        </div>
+      </div>
+      <div className="border-t b-soft py-4 text-center text-[10px] text-white/30 uppercase tracking-widest">
+        © {new Date().getFullYear()} RIVALS COD LEAGUE — جميع الحقوق محفوظة
+      </div>
+    </footer>
   );
 }

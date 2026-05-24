@@ -19,6 +19,7 @@ def _register(suffix):
         "username": f"lb_{suffix}_{uuid.uuid4().hex[:5]}",
         "password": "Pass@1234",
         "act": f"COD_{suffix}_{uuid.uuid4().hex[:4]}",
+        "accepted_terms": True,
     })
     assert r.status_code == 200, r.text
     return s, r.json()["user"], r.json()["token"]

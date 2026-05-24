@@ -11,6 +11,7 @@ export default function AuthPage() {
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
   const [act, setAct] = useState("");
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const navigate = useNavigate();
@@ -23,7 +24,12 @@ export default function AuthPage() {
       if (tab === "login") {
         await login(email, password);
       } else {
-        await register({ email, password, username, act });
+        if (!acceptedTerms) {
+          setError("يجب الموافقة على الشروط والأحكام قبل التسجيل");
+          setLoading(false);
+          return;
+        }
+        await register({ email, password, username, act, accepted_terms: true });
       }
       toast.success("مرحباً بك في Rivals");
       navigate("/");
@@ -156,6 +162,24 @@ export default function AuthPage() {
               <div data-testid="auth-error" className="text-sm text-destructive border border-destructive/30 rounded-md p-3 bg-destructive/10">
                 {error}
               </div>
+            )}
+
+            {tab === "register" && (
+              <label className="flex items-start gap-2 cursor-pointer text-xs text-white/70" data-testid="terms-label">
+                <input
+                  data-testid="accept-terms"
+                  type="checkbox"
+                  checked={acceptedTerms}
+                  onChange={(e) => setAcceptedTerms(e.target.checked)}
+                  className="mt-0.5 accent-gold-500 h-4 w-4"
+                />
+                <span>
+                  أوافق على{" "}
+                  <a href="/rules" target="_blank" rel="noreferrer" className="text-gold-500 hover:underline">
+                    الشروط والأحكام وسياسة الخصوصية
+                  </a>
+                </span>
+              </label>
             )}
 
             <button

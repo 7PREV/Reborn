@@ -9,9 +9,9 @@ export default function RulesPage() {
   const [rules, setRules] = useState([]);
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ title: "", body: "", order: 0 });
+  const [form, setForm] = useState({ title: "", body: "", order: 0, image: "" });
 
-  const isAdmin = user?.role === "admin";
+  const isAdmin = user?.role === "admin" || user?.role === "owner";
 
   const load = async () => {
     const { data } = await api.get("/rules");
@@ -22,7 +22,7 @@ export default function RulesPage() {
 
   const startCreate = () => {
     setCreating(true);
-    setForm({ title: "", body: "", order: rules.length + 1 });
+    setForm({ title: "", body: "", order: rules.length + 1, image: "" });
   };
 
   const save = async (e) => {
@@ -45,8 +45,17 @@ export default function RulesPage() {
 
   const startEdit = (r) => {
     setEditing(r.id);
-    setForm({ title: r.title, body: r.body, order: r.order });
+    setForm({ title: r.title, body: r.body, order: r.order, image: r.image || "" });
     setCreating(false);
+  };
+
+  const onImage = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 2_000_000) return toast.error("الصورة كبيرة (الحد 2MB)");
+    const fr = new FileReader();
+    fr.onload = () => setForm((p) => ({ ...p, image: fr.result }));
+    fr.readAsDataURL(f);
   };
 
   const remove = async (id) => {
@@ -97,6 +106,20 @@ export default function RulesPage() {
             placeholder="ترتيب"
             className="w-32 bg-background border b-soft rounded-md px-4 py-2 outline-none focus:border-gold-500/40"
           />
+          <div>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">صورة مرفقة (اختياري — ≤2MB)</label>
+            <label className="inline-flex items-center gap-2 px-3 py-2 rounded-md bg-background border b-soft hover:border-gold-500/40 text-sm cursor-pointer">
+              <Plus size={14} />
+              <span>{form.image ? "تم اختيار صورة" : "اختر صورة"}</span>
+              <input data-testid="rule-image-input" type="file" accept="image/*" onChange={onImage} className="hidden" />
+            </label>
+            {form.image && (
+              <div className="mt-2 flex items-center gap-2">
+                <img src={form.image} alt="rule" className="max-h-32 rounded border b-soft" />
+                <button type="button" onClick={() => setForm({ ...form, image: "" })} className="px-2 py-1 text-xs text-destructive hover:bg-destructive/10 rounded">حذف الصورة</button>
+              </div>
+            )}
+          </div>
           <div className="flex gap-2">
             <button data-testid="save-rule" type="submit" className="px-5 py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 flex items-center gap-1">
               <Save size={14} /> حفظ
@@ -118,6 +141,9 @@ export default function RulesPage() {
               <div className="flex-1 min-w-0">
                 <h3 className="font-display font-bold text-lg">{r.title}</h3>
                 <p className="text-white/70 mt-1 whitespace-pre-wrap leading-relaxed">{r.body}</p>
+                {r.image && (
+                  <img src={r.image} alt={r.title} className="mt-3 rounded-md max-h-72 border b-soft" data-testid={`rule-image-${r.id}`} />
+                )}
               </div>
               {isAdmin && (
                 <div className="flex gap-1">

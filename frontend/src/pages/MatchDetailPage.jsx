@@ -8,6 +8,7 @@ import MapsBoard from "../components/match/MapsBoard";
 import ChatMessage from "../components/match/ChatMessage";
 import LiveStreamsPanel from "../components/match/LiveStreamsPanel";
 import MatchPrayerBreak from "../components/match/MatchPrayerBreak";
+import H2HWidget from "../components/match/H2HWidget";
 
 const IMG_MAX = 3_000_000;
 const POLL_MS = 4000;
@@ -432,7 +433,8 @@ export default function MatchDetailPage() {
           )}
         </div>
 
-        <aside className="lg:sticky lg:top-20 self-start">
+        <aside className="lg:sticky lg:top-20 self-start space-y-4">
+          <H2HWidget matchId={id} />
           <LiveStreamsPanel matchId={id} />
         </aside>
       </div>

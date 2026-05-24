@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search, Edit3, Mail, KeyRound, X } from "lucide-react";
+import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search, Edit3, Mail, KeyRound, X, Zap } from "lucide-react";
 import { toast } from "sonner";
 import BannerManager from "../components/admin/BannerManager";
 
@@ -321,6 +321,112 @@ function PasswordResetsPanel() {
   );
 }
 
+function OwnerPlusGrants() {
+  const { user } = useAuth();
+  const [userQuery, setUserQuery] = useState("");
+  const [userResults, setUserResults] = useState([]);
+  const [clans, setClans] = useState([]);
+  const [days, setDays] = useState(30);
+
+  useEffect(() => {
+    if (user?.role === "owner") {
+      api.get("/clans").then((r) => setClans(r.data)).catch(() => {});
+    }
+  }, [user]);
+
+  const searchUser = async (q) => {
+    setUserQuery(q);
+    if (q.length < 2) return setUserResults([]);
+    const { data } = await api.get("/users/search", { params: { q } });
+    setUserResults(data.slice(0, 6));
+  };
+
+  const grantUser = async (uid, action) => {
+    try {
+      await api.post(`/admin/users/${uid}/personal-plus`, { action, days });
+      toast.success(action === "grant" ? "تم تفعيل Personal Plus" : "تم إلغاء Personal Plus");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    }
+  };
+
+  const grantClan = async (cid, action) => {
+    try {
+      await api.post(`/admin/clans/${cid}/plus`, { action, days });
+      toast.success(action === "grant" ? "تم تفعيل Clan Plus" : "تم إلغاء Clan Plus");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    }
+  };
+
+  if (user?.role !== "owner") return null;
+
+  return (
+    <section data-testid="owner-plus-block" className="bg-gold-500/5 border border-gold-500/40 rounded-2xl p-6">
+      <h2 className="font-display font-black text-2xl mb-1 flex items-center gap-2">
+        <Zap className="text-gold-500" /> منح Plus يدوياً (المالك فقط)
+      </h2>
+      <p className="text-xs text-white/50 mb-4">تجاوز بوابة الدفع وامنح Personal Plus أو Clan Plus لأي حساب أو كلان.</p>
+
+      <div className="grid md:grid-cols-2 gap-6">
+        <div>
+          <div className="text-xs uppercase tracking-widest text-gold-500 mb-2">Personal Plus لمستخدم</div>
+          <div className="flex items-center gap-2 mb-2">
+            <input
+              data-testid="plus-days"
+              type="number" min={1} max={3650}
+              value={days}
+              onChange={(e) => setDays(Number(e.target.value))}
+              className="w-20 bg-background border b-soft rounded-md px-2 py-1 text-sm"
+            />
+            <span className="text-xs text-white/40">يوم</span>
+          </div>
+          <div className="relative">
+            <Search size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-white/30" />
+            <input
+              data-testid="plus-user-search"
+              value={userQuery}
+              onChange={(e) => searchUser(e.target.value)}
+              placeholder="ابحث باسم أو بريد..."
+              className="w-full bg-surface border b-soft rounded-md pr-9 pl-3 py-2 outline-none text-sm"
+            />
+          </div>
+          <div className="mt-2 space-y-1">
+            {userResults.map((u) => (
+              <div key={u.id} className="flex items-center gap-2 bg-background border b-soft rounded-md p-2 text-sm" data-testid={`plus-user-${u.id}`}>
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold truncate">{u.username}</div>
+                  <div className="text-[10px] text-white/40 truncate">{u.email}</div>
+                </div>
+                {u.is_personal_plus && <span className="text-[10px] uppercase bg-gold-500 text-black px-1.5 py-0.5 rounded">Plus</span>}
+                <button data-testid={`grant-user-${u.id}`} onClick={() => grantUser(u.id, "grant")} className="px-2 py-1 rounded bg-gold-500/15 text-gold-500 hover:bg-gold-500/25 text-xs">منح</button>
+                <button data-testid={`revoke-user-${u.id}`} onClick={() => grantUser(u.id, "revoke")} className="px-2 py-1 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 text-xs">إلغاء</button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs uppercase tracking-widest text-emerald-400 mb-2">Clan Plus لكلان</div>
+          <div className="max-h-[260px] overflow-y-auto space-y-1">
+            {clans.map((c) => (
+              <div key={c.id} className="flex items-center gap-2 bg-background border b-soft rounded-md p-2 text-sm" data-testid={`plus-clan-${c.id}`}>
+                <Shield size={14} className="text-emerald-400" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold truncate">{c.name} <span className="text-xs text-emerald-400">[{c.tag}]</span></div>
+                </div>
+                {c.is_plus && <span className="text-[10px] uppercase bg-emerald-400 text-black px-1.5 py-0.5 rounded">Plus</span>}
+                <button data-testid={`grant-clan-${c.id}`} onClick={() => grantClan(c.id, "grant")} className="px-2 py-1 rounded bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 text-xs">منح</button>
+                <button data-testid={`revoke-clan-${c.id}`} onClick={() => grantClan(c.id, "revoke")} className="px-2 py-1 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 text-xs">إلغاء</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function AdminPage() {
   const { user } = useAuth();
   const [live, setLive] = useState([]);
@@ -417,6 +523,7 @@ export default function AdminPage() {
       )}
 
       <UserRoleManager />
+      <OwnerPlusGrants />
       <ClanEditor />
       <PasswordResetsPanel />
       <BannerManager />
