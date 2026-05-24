@@ -8,6 +8,7 @@ export default function Layout({ children }) {
 
   const nav = [
     { to: "/", label: "الرئيسية", icon: HomeIcon, id: "nav-home" },
+    { to: "/plus", label: "Personal Plus", icon: Sparkles, id: "nav-plus" },
     { to: "/tournaments", label: "البطولات", icon: Award, id: "nav-tournaments" },
     { to: "/matches", label: "المباريات", icon: Swords, id: "nav-matches" },
     { to: "/clans", label: "الكلانات", icon: Shield, id: "nav-clans" },

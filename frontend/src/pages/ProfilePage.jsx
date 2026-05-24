@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { Shield, Trophy, Mail, Check, X, Sparkles, Tv, Save, RefreshCw, Lock } from "lucide-react";
+import { Shield, Trophy, Mail, Check, X, Sparkles, Tv, Save, RefreshCw, Lock, Image as ImageIcon, Palette, Twitch } from "lucide-react";
 import { toast } from "sonner";
 
 const ACT_COOLDOWN_DAYS = 14;
@@ -100,38 +100,36 @@ export default function ProfilePage() {
 
   if (!user) return null;
 
+  const isPlus = !!user.is_personal_plus;
+  const accent = (isPlus && user.accent_color) || "#FFCC00";
+  const bannerStyle = isPlus && user.banner
+    ? { backgroundImage: `url(${user.banner})`, backgroundSize: "cover", backgroundPosition: "center" }
+    : { background: `linear-gradient(135deg, ${accent}22, transparent 80%)` };
+
   return (
     <div className="space-y-8">
-      <div className="bg-surface border b-soft rounded-xl p-6 md:p-8 flex items-center gap-5 flex-wrap">
-        <div className="h-20 w-20 rounded-lg bg-gold-500/10 text-gold-500 grid place-items-center font-display font-black text-3xl">
-          {user.username[0].toUpperCase()}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-xs uppercase tracking-widest text-gold-500 flex items-center gap-2">
-            {user.role === "admin" ? "منظم" : user.is_plus ? "Plus" : "لاعب"}
-            {user.is_plus && <Sparkles size={12} />}
-          </div>
-          <h1 className="font-display font-black text-3xl">{user.username}</h1>
-          <div className="text-white/50 text-sm">{user.email}</div>
-          {user.act && (
-            <div className="mt-2 inline-flex items-center gap-1 text-xs bg-white/5 border b-soft rounded px-2 py-1" data-testid="profile-act">
-              <span className="text-white/40">Activision ID:</span>
-              <span className="text-gold-400 font-bold">{user.act}</span>
+      <PremiumProfileHeader user={user} accent={accent} bannerStyle={bannerStyle} />
+
+      {user.clan_id && (
+        <Link to={`/clans/${user.clan_id}`} data-testid="profile-clan-link" className="block bg-surface border b-soft rounded-xl p-5 hover:border-gold-500/30">
+          <div className="flex items-center gap-3">
+            <Shield className="text-gold-500" />
+            <div className="flex-1">
+              <div className="text-xs uppercase tracking-widest text-white/40">كلانك</div>
+              <div className="font-display font-black text-lg">اذهب إلى صفحة الكلان</div>
             </div>
-          )}
-        </div>
-        <div className="text-center">
-          <div className="text-3xl font-display font-black text-gold-500 flex items-center gap-1">
-            <Trophy size={20} /> {user.points}
           </div>
-          <div className="text-[10px] uppercase tracking-widest text-white/40">النقاط</div>
-        </div>
-      </div>
+        </Link>
+      )}
+
+      {isPlus && (
+        <PersonalPlusCustomizer user={user} />
+      )}
 
       <div className={`rounded-xl p-6 border ${user.is_plus ? "border-gold-500/40 bg-gold-500/5" : "border-white/5 bg-surface"}`}>
         <div className="flex items-center gap-3 mb-3">
           <Sparkles className="text-gold-500" />
-          <h2 className="font-display font-black text-xl">RIVALS Plus</h2>
+          <h2 className="font-display font-black text-xl">RIVALS Plus (الكلان)</h2>
           {user.is_plus && <span className="text-[10px] uppercase tracking-widest bg-gold-500 text-black px-2 py-0.5 rounded">مفعل</span>}
         </div>
         {user.plus_expires_at && (
@@ -143,7 +141,7 @@ export default function ProfilePage() {
           <li>زيادة سعة الكلان من 7 إلى 12 لاعب</li>
           <li>تعيين نائبَين للقائد بدل نائب واحد</li>
           <li>دعم أولوية في النزاعات</li>
-          <li className="text-gold-500">🎁 املأ كلانك بـ 6 لاعبين تحصل على Plus مجاناً لمدة 7 أيام</li>
+          <li className="text-gold-500">🎁 املأ كلانك حتى يصل لـ 6 لاعبين تحصل على Plus مجاناً لمدة 7 أيام</li>
         </ul>
         <button data-testid="toggle-plus-btn" onClick={togglePlus} className={`px-4 py-2 rounded-md font-bold ${
           user.is_plus ? "bg-white/5 hover:bg-white/10" : "bg-gold-500 text-black hover:bg-gold-400"
@@ -251,16 +249,6 @@ export default function ProfilePage() {
         </div>
       )}
 
-      {user.clan_id && (
-        <div className="bg-surface border b-soft rounded-xl p-5 flex items-center gap-3">
-          <Shield className="text-gold-500" />
-          <span>أنت عضو في كلان</span>
-          <Link to={`/clans/${user.clan_id}`} className="mr-auto px-3 py-1.5 rounded bg-gold-500 text-black text-sm font-bold hover:bg-gold-400">
-            عرض الكلان
-          </Link>
-        </div>
-      )}
-
       <section>
         <h2 className="font-display font-black text-2xl mb-4 flex items-center gap-2">
           <Mail size={20} className="text-gold-500" /> دعوات الانضمام
@@ -284,5 +272,174 @@ export default function ProfilePage() {
         )}
       </section>
     </div>
+  );
+}
+
+// --------------- Premium profile header ----------------
+function PremiumProfileHeader({ user, accent, bannerStyle }) {
+  const isPlus = !!user.is_personal_plus;
+  const role = user.role === "owner" ? "مالك" : user.role === "admin" ? "منظم" : "لاعب";
+  const winLoss = `${user.wins || 0} / ${user.losses || 0}`;
+  const initial = (user.username?.[0] || "?").toUpperCase();
+
+  return (
+    <div data-testid="premium-profile" className="rounded-2xl overflow-hidden border b-soft bg-surface">
+      <div data-testid="profile-banner" className="h-48 md:h-56 w-full relative" style={bannerStyle}>
+        <div className="absolute inset-0 bg-gradient-to-t from-background via-background/40 to-transparent" />
+        <div className="absolute top-3 left-3 flex items-center gap-1 text-[10px] uppercase tracking-widest bg-black/40 backdrop-blur px-2 py-1 rounded">
+          {isPlus ? <Sparkles size={10} className="text-gold-500" /> : null}
+          <span style={{ color: isPlus ? accent : "#fff" }}>{role}</span>
+          {isPlus && <span className="text-gold-500">• Personal Plus</span>}
+        </div>
+      </div>
+      <div className="px-6 md:px-8 pb-6 -mt-12 relative">
+        <div className="flex items-end gap-4 flex-wrap">
+          <div
+            data-testid="profile-avatar"
+            className="h-24 w-24 md:h-28 md:w-28 rounded-full border-4 border-background grid place-items-center overflow-hidden text-3xl font-display font-black"
+            style={{
+              backgroundColor: isPlus && user.avatar ? "transparent" : `${accent}22`,
+              color: accent,
+              boxShadow: `0 0 0 2px ${accent}55`,
+            }}
+          >
+            {isPlus && user.avatar ? (
+              <img src={user.avatar} alt={user.username} className="h-full w-full object-cover" />
+            ) : initial}
+          </div>
+          <div className="flex-1 min-w-0">
+            {user.act ? (
+              <h1 data-testid="profile-act-display" className="font-display font-black text-3xl md:text-4xl truncate" style={{ color: accent }}>
+                {user.act}
+              </h1>
+            ) : (
+              <h1 className="font-display font-black text-3xl md:text-4xl truncate text-white/70">{user.username}</h1>
+            )}
+            <div className="text-white/50 text-sm mt-1">@{user.username} • {user.email}</div>
+          </div>
+          <div className="flex items-center gap-4">
+            <Stat label="نقاط" value={user.points || 0} accent={accent} testid="stat-points" />
+            <Stat label="فوز/خسارة" value={winLoss} accent={accent} testid="stat-wl" />
+            <Stat label="W/L" value={user.kd ?? 0} accent={accent} testid="stat-kd" />
+          </div>
+        </div>
+
+        <div className="mt-6">
+          <div className="text-[10px] uppercase tracking-widest text-white/40 mb-2">القنوات والحسابات</div>
+          <div className="space-y-2">
+            <SocialRow icon={<Twitch size={16} />} label="Twitch" url={user.twitch_url} accent={accent} testid="social-twitch" />
+            <SocialRow icon={<Tv size={16} />} label="Kick" url={user.kick_url} accent={accent} testid="social-kick" />
+            <SocialRow icon={<Tv size={16} />} label="TikTok" url={user.tiktok_url} accent={accent} testid="social-tiktok" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, accent, testid }) {
+  return (
+    <div className="text-center" data-testid={testid}>
+      <div className="font-display font-black text-2xl" style={{ color: accent }}>{value}</div>
+      <div className="text-[10px] uppercase tracking-widest text-white/40">{label}</div>
+    </div>
+  );
+}
+
+function SocialRow({ icon, label, url, accent, testid }) {
+  if (!url) {
+    return (
+      <div className="flex items-center gap-3 bg-background/40 border b-soft rounded-md px-3 py-2 text-sm text-white/40" data-testid={testid}>
+        <span style={{ color: accent }}>{icon}</span>
+        <span className="font-bold w-16">{label}</span>
+        <span className="text-xs">— لا يوجد رابط —</span>
+      </div>
+    );
+  }
+  return (
+    <a href={url} target="_blank" rel="noreferrer" data-testid={testid} className="flex items-center gap-3 bg-background/40 border b-soft rounded-md px-3 py-2 text-sm hover:border-gold-500/40 transition">
+      <span style={{ color: accent }}>{icon}</span>
+      <span className="font-bold w-16">{label}</span>
+      <span className="text-white/70 truncate flex-1">{url}</span>
+    </a>
+  );
+}
+
+// --------------- Personal Plus customizer ----------------
+async function fileToDataUrl(file) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.onerror = rej;
+    fr.readAsDataURL(file);
+  });
+}
+
+function PersonalPlusCustomizer({ user }) {
+  const [avatar, setAvatar] = useState(user.avatar || "");
+  const [banner, setBanner] = useState(user.banner || "");
+  const [accent, setAccent] = useState(user.accent_color || "#FFCC00");
+  const [busy, setBusy] = useState(false);
+
+  const onPickAvatar = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 2_000_000) return toast.error("الأفاتار كبير (الحد 2MB)");
+    setAvatar(await fileToDataUrl(f));
+  };
+  const onPickBanner = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 3_000_000) return toast.error("البانر كبير (الحد 3MB)");
+    setBanner(await fileToDataUrl(f));
+  };
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.put("/me/profile", { avatar, banner, accent_color: accent });
+      toast.success("تم حفظ التخصيصات");
+      window.location.reload();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section data-testid="plus-customizer" className="bg-gold-500/5 border border-gold-500/30 rounded-xl p-6">
+      <h2 className="font-display font-black text-xl mb-3 flex items-center gap-2">
+        <Sparkles className="text-gold-500" /> تخصيص Personal Plus
+      </h2>
+      <p className="text-xs text-white/60 mb-4">رفع صورة شخصية، بانر خلفية، واختيار لون مميز يظهر في ملفك الشخصي.</p>
+      <div className="grid sm:grid-cols-3 gap-3">
+        <label className="cursor-pointer bg-background border b-soft rounded-md p-3 flex flex-col items-center gap-2 text-xs text-center hover:border-gold-500/40">
+          <ImageIcon size={20} className="text-gold-500" />
+          <span>أفاتار (≤2MB)</span>
+          <input data-testid="upload-avatar" type="file" accept="image/*" onChange={onPickAvatar} className="hidden" />
+          {avatar && <span className="text-[10px] text-emerald-400">✓ صورة محملة</span>}
+        </label>
+        <label className="cursor-pointer bg-background border b-soft rounded-md p-3 flex flex-col items-center gap-2 text-xs text-center hover:border-gold-500/40">
+          <ImageIcon size={20} className="text-gold-500" />
+          <span>بانر (≤3MB)</span>
+          <input data-testid="upload-banner" type="file" accept="image/*" onChange={onPickBanner} className="hidden" />
+          {banner && <span className="text-[10px] text-emerald-400">✓ بانر محمل</span>}
+        </label>
+        <label className="bg-background border b-soft rounded-md p-3 flex flex-col items-center gap-2 text-xs text-center">
+          <Palette size={20} className="text-gold-500" />
+          <span>لون مميز</span>
+          <input data-testid="accent-color" type="color" value={accent} onChange={(e) => setAccent(e.target.value)} className="h-8 w-20 cursor-pointer bg-transparent border-0" />
+          <span className="text-[10px] text-white/40 font-mono">{accent}</span>
+        </label>
+      </div>
+      <button
+        data-testid="save-plus-customizer"
+        onClick={save}
+        disabled={busy}
+        className="mt-4 px-4 py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 disabled:opacity-50 flex items-center gap-2"
+      >
+        <Save size={14} /> {busy ? "..." : "حفظ التخصيصات"}
+      </button>
+    </section>
   );
 }

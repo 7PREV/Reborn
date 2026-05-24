@@ -36,9 +36,14 @@ CLAN_LIMIT_PLUS = 12
 VICE_LIMIT_DEFAULT = 1
 VICE_LIMIT_PLUS = 2
 
-ACT_CHANGE_COOLDOWN_DAYS = 14   # Activision ID can only be changed every 14 days
-ONLINE_WINDOW_MINUTES = 5       # User counts as "online" if last_seen_at within this window
-MATCH_PRAYER_BREAK_SECONDS = 15 * 60   # 15-min full-match prayer break (chat level)
+ACT_CHANGE_COOLDOWN_DAYS = 14
+ONLINE_WINDOW_MINUTES = 5
+MATCH_PRAYER_BREAK_SECONDS = 15 * 60
+
+CLAN_PLUS_REWARD_THRESHOLD = 6       # Founders Plus unlock once clan reaches exactly 6 members
+CHALLENGE_MIN_MEMBERS = 6            # Clan must have ≥6 members to challenge / accept
+PERSONAL_PLUS_TRIAL_DAYS = 3         # Free trial granted at registration
+PRAYER_BREAK_USER_COOLDOWN_MIN = 30  # 30 min anti-spam cooldown on prayer-break button
 
 app = FastAPI(title="Rivals Esports API")
 api = APIRouter(prefix="/api")
@@ -96,6 +101,25 @@ def user_is_plus(u: dict) -> bool:
         return False
 
 
+def user_is_personal_plus(u: dict) -> bool:
+    """Personal Plus is a per-user subscription tier (separate from clan Plus).
+    Free trial = 3 days from registration. Active if `personal_plus_until` > now."""
+    iso_until = u.get("personal_plus_until")
+    if not iso_until:
+        return False
+    try:
+        return datetime.fromisoformat(iso_until) > now_utc()
+    except Exception:
+        return False
+
+
+def compute_kd(wins: int, losses: int) -> float:
+    """Win/Loss ratio formatted as K/D — losses=0 returns float wins."""
+    if losses <= 0:
+        return float(wins)
+    return round(wins / losses, 2)
+
+
 def sanitize_user(u: dict) -> dict:
     last_seen = u.get("last_seen_at")
     is_online = False
@@ -104,6 +128,8 @@ def sanitize_user(u: dict) -> dict:
             is_online = (now_utc() - datetime.fromisoformat(last_seen)).total_seconds() < ONLINE_WINDOW_MINUTES * 60
         except Exception:
             is_online = False
+    wins = u.get("wins", 0)
+    losses = u.get("losses", 0)
     return {
         "id": u["id"],
         "email": u["email"],
@@ -113,8 +139,15 @@ def sanitize_user(u: dict) -> dict:
         "role": u.get("role", "player"),
         "clan_id": u.get("clan_id"),
         "points": u.get("points", 0),
+        "wins": wins,
+        "losses": losses,
+        "kd": compute_kd(wins, losses),
         "avatar": u.get("avatar"),
+        "banner": u.get("banner"),
+        "accent_color": u.get("accent_color"),
         "is_plus": user_is_plus(u),
+        "is_personal_plus": user_is_personal_plus(u),
+        "personal_plus_until": u.get("personal_plus_until"),
         "plus_expires_at": u.get("plus_expires_at"),
         "clan_cooldown_until": u.get("clan_cooldown_until"),
         "twitch_url": u.get("twitch_url", ""),
@@ -122,8 +155,24 @@ def sanitize_user(u: dict) -> dict:
         "tiktok_url": u.get("tiktok_url", ""),
         "last_seen_at": last_seen,
         "is_online": is_online,
+        "prayer_break_cooldown_until": u.get("prayer_break_cooldown_until"),
         "created_at": u.get("created_at"),
     }
+
+
+def _assert_act_set(user: dict) -> None:
+    """Block clan join attempts when player's Activision ID is missing."""
+    if not (user.get("act") or "").strip():
+        raise HTTPException(400, "يجب حفظ Activision ID في الملف الشخصي قبل الانضمام لكلان")
+
+
+def _assert_clan_can_match(clan: dict) -> None:
+    """Roster minimum gate for issuing/accepting matches."""
+    if clan.get("archived"):
+        raise HTTPException(400, "هذا الكلان مؤرشف")
+    members = len(clan.get("member_ids", []))
+    if members < CHALLENGE_MIN_MEMBERS:
+        raise HTTPException(400, f"الكلان يحتاج {CHALLENGE_MIN_MEMBERS} لاعبين على الأقل لخوض المباريات ({members}/{CHALLENGE_MIN_MEMBERS})")
 
 
 CLAN_LEAVE_COOLDOWN_HOURS = 2
@@ -158,14 +207,18 @@ async def _start_clan_leave_cooldown(user_id: str) -> None:
 
 
 async def _maybe_grant_full_clan_reward(clan_id: str) -> bool:
-    """When a clan first reaches 7 members, grant the leader 7-day Plus.
-    Returns True if reward was just granted."""
+    """When a clan first reaches exactly CLAN_PLUS_REWARD_THRESHOLD (6) active members,
+    grant the leader 7-day Plus. Returns True if reward was just granted.
+    The check is idempotent — `founder_reward_given` prevents re-issue."""
     clan = await db.clans.find_one({"id": clan_id})
     if not clan:
         return False
     if clan.get("founder_reward_given"):
         return False
-    if len(clan.get("member_ids", [])) < CLAN_LIMIT_DEFAULT:
+    if clan.get("archived"):
+        return False
+    members = clan.get("member_ids", [])
+    if len(members) < CLAN_PLUS_REWARD_THRESHOLD:
         return False
     leader = await db.users.find_one({"id": clan["leader_id"]})
     if not leader:
@@ -174,7 +227,6 @@ async def _maybe_grant_full_clan_reward(clan_id: str) -> bool:
     if not leader.get("is_plus"):
         new_expiry = now_utc() + timedelta(days=7)
         existing_exp = leader.get("plus_expires_at")
-        # Extend if already has a future expiry
         if existing_exp:
             try:
                 cur = datetime.fromisoformat(existing_exp)
@@ -294,6 +346,9 @@ class ProfileUpdateIn(BaseModel):
     kick_url: Optional[str] = ""
     tiktok_url: Optional[str] = ""
     act: Optional[str] = None
+    avatar: Optional[str] = None        # base64 data URL (≤2MB) — Personal Plus only
+    banner: Optional[str] = None        # base64 data URL (≤3MB) — Personal Plus only
+    accent_color: Optional[str] = None  # hex string — Personal Plus only
 
 
 class AdminUserEditIn(BaseModel):
@@ -468,9 +523,14 @@ async def register(body: RegisterIn, response: Response):
         "password_hash": hash_pw(body.password),
         "role": "player",
         "points": 0,
+        "wins": 0,
+        "losses": 0,
         "clan_id": None,
         "avatar": None,
+        "banner": None,
+        "accent_color": None,
         "is_plus": False,
+        "personal_plus_until": iso(now_utc() + timedelta(days=PERSONAL_PLUS_TRIAL_DAYS)),
         "clan_cooldown_until": None,
         "created_at": iso(now_utc()),
     }
@@ -620,6 +680,7 @@ async def request_join(clan_id: str, user: dict = Depends(get_current_user)):
     if user.get("clan_id"):
         raise HTTPException(400, "أنت بالفعل في كلان")
     _assert_no_cooldown(user)
+    _assert_act_set(user)
     clan = await _get_clan(clan_id)
     max_members, _ = await _leader_limits(clan)
     if len(clan.get("member_ids", [])) >= max_members:
@@ -665,6 +726,7 @@ async def handle_request(clan_id: str, req_id: str, body: HandleRequestIn, user:
         target = await db.users.find_one({"id": req["user_id"]})
         if target and not target.get("clan_id"):
             _assert_no_cooldown(target)
+            _assert_act_set(target)
             await db.users.update_one(
                 {"id": req["user_id"]},
                 {"$set": {"clan_id": clan_id, "clan_cooldown_until": None}},
@@ -722,6 +784,7 @@ async def respond_invite(inv_id: str, body: HandleRequestIn, user: dict = Depend
         raise HTTPException(404, "الدعوة غير موجودة")
     if body.action == "accept" and not user.get("clan_id"):
         _assert_no_cooldown(user)
+        _assert_act_set(user)
         clan = await _get_clan(inv["clan_id"])
         max_members, _ = await _leader_limits(clan)
         if len(clan.get("member_ids", [])) >= max_members:
@@ -793,6 +856,8 @@ async def create_challenge(clan_id: str, body: ChallengeIn, user: dict = Depends
     if body.opponent_clan_id == clan_id:
         raise HTTPException(400, "لا يمكن تحدي نفس الكلان")
     opponent = await _get_clan(body.opponent_clan_id)
+    _assert_clan_can_match(challenger)
+    _assert_clan_can_match(opponent)
     await _check_match_pair_cooldown(clan_id, opponent["id"])
     existing = await db.challenges.find_one({
         "status": "pending",
@@ -849,7 +914,10 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
     if body.action == "reject":
         await db.challenges.update_one({"id": ch_id}, {"$set": {"status": "rejected"}})
         return {"ok": True, "status": "rejected"}
-    # Accept → create live match
+    # Accept → enforce roster minimum + create live match
+    challenger = await _get_clan(ch["challenger_clan_id"])
+    _assert_clan_can_match(challenger)
+    _assert_clan_can_match(opponent)
     await _check_match_pair_cooldown(ch["challenger_clan_id"], ch["opponent_clan_id"])
     maps = [
         {"index": i, "vote_a": None, "vote_b": None, "winner": None,
@@ -968,6 +1036,13 @@ async def _maybe_finish(match: dict):
     }})
     await db.clans.update_one({"id": winner}, {"$inc": {"wins": 1, "points": POINTS_WIN}})
     await db.clans.update_one({"id": loser}, {"$inc": {"losses": 1, "points": POINTS_LOSS}})
+    # Career stats: increment player wins/losses for each active member of each side
+    winner_clan = await db.clans.find_one({"id": winner}, {"_id": 0, "member_ids": 1})
+    loser_clan = await db.clans.find_one({"id": loser}, {"_id": 0, "member_ids": 1})
+    if winner_clan and winner_clan.get("member_ids"):
+        await db.users.update_many({"id": {"$in": winner_clan["member_ids"]}}, {"$inc": {"wins": 1}})
+    if loser_clan and loser_clan.get("member_ids"):
+        await db.users.update_many({"id": {"$in": loser_clan["member_ids"]}}, {"$inc": {"losses": 1}})
     # If part of a tournament, advance bracket
     fresh_match = await db.matches.find_one({"id": match["id"]}, {"_id": 0})
     if fresh_match and fresh_match.get("tournament_id"):
@@ -1155,6 +1230,13 @@ async def _finalize_withdrawal(match_id: str, withdrawing_clan: str, winning_cla
     }})
     await db.clans.update_one({"id": winning_clan}, {"$inc": {"wins": 1, "points": POINTS_WIN}})
     await db.clans.update_one({"id": withdrawing_clan}, {"$inc": {"losses": 1, "points": POINTS_WITHDRAW}})
+    # Career stats for individual players
+    w_clan = await db.clans.find_one({"id": winning_clan}, {"_id": 0, "member_ids": 1})
+    l_clan = await db.clans.find_one({"id": withdrawing_clan}, {"_id": 0, "member_ids": 1})
+    if w_clan and w_clan.get("member_ids"):
+        await db.users.update_many({"id": {"$in": w_clan["member_ids"]}}, {"$inc": {"wins": 1}})
+    if l_clan and l_clan.get("member_ids"):
+        await db.users.update_many({"id": {"$in": l_clan["member_ids"]}}, {"$inc": {"losses": 1}})
     await db.chat_messages.insert_one({
         "id": str(uuid.uuid4()),
         "match_id": match_id,
@@ -1999,6 +2081,33 @@ async def update_my_profile(body: ProfileUpdateIn, user: dict = Depends(get_curr
         if val and not _is_url(val):
             raise HTTPException(400, f"رابط {field} غير صالح")
         update[field] = val
+    # Personal Plus gated visual customization
+    visual_fields = {"avatar": body.avatar, "banner": body.banner, "accent_color": body.accent_color}
+    wants_visual = any(v is not None for v in visual_fields.values())
+    if wants_visual and not user_is_personal_plus(user):
+        raise HTTPException(403, "تخصيص الصورة والبانر واللون متاح لمشتركي Personal Plus فقط")
+    AVATAR_MAX = 2_000_000
+    BANNER_MAX = 3_000_000
+    HEX_RE = "#"
+    if body.avatar is not None:
+        v = body.avatar.strip()
+        if v and (not v.startswith("data:image/")) and (not v.startswith("http")):
+            raise HTTPException(400, "صيغة الصورة غير صحيحة")
+        if v.startswith("data:") and len(v) > AVATAR_MAX * 1.4:
+            raise HTTPException(400, "حجم الصورة كبير (الحد 2MB)")
+        update["avatar"] = v or None
+    if body.banner is not None:
+        v = body.banner.strip()
+        if v and (not v.startswith("data:image/")) and (not v.startswith("http")):
+            raise HTTPException(400, "صيغة البانر غير صحيحة")
+        if v.startswith("data:") and len(v) > BANNER_MAX * 1.4:
+            raise HTTPException(400, "حجم البانر كبير (الحد 3MB)")
+        update["banner"] = v or None
+    if body.accent_color is not None:
+        v = body.accent_color.strip()
+        if v and (not v.startswith(HEX_RE) or len(v) not in (4, 7)):
+            raise HTTPException(400, "اللون يجب أن يكون hex مثل #FFCC00")
+        update["accent_color"] = v or None
     if update:
         await db.users.update_one({"id": user["id"]}, {"$set": update})
     fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0})
@@ -2307,6 +2416,18 @@ async def start_match_prayer_break(match_id: str, user: dict = Depends(get_curre
             raise
         except Exception:
             pass
+    # Per-user 30-min anti-spam cooldown on prayer-break trigger
+    cd_iso = user.get("prayer_break_cooldown_until")
+    if cd_iso and not is_staff(user):
+        try:
+            cd_dt = datetime.fromisoformat(cd_iso)
+            if now_utc() < cd_dt:
+                mins = int((cd_dt - now_utc()).total_seconds() / 60) + 1
+                raise HTTPException(400, f"يجب الانتظار {mins} دقيقة قبل بريك جديد")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     now = now_utc()
     pb = {
         "started_at": iso(now),
@@ -2317,6 +2438,11 @@ async def start_match_prayer_break(match_id: str, user: dict = Depends(get_curre
         "resumed": False,
     }
     await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+    # Set per-user cooldown so the same user can't spam another prayer break for 30 min
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"prayer_break_cooldown_until": iso(now + timedelta(minutes=PRAYER_BREAK_USER_COOLDOWN_MIN))}},
+    )
     # System chat message
     await db.chat_messages.insert_one({
         "id": str(uuid.uuid4()),

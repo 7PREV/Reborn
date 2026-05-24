@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import api, { formatApiErrorDetail } from "../../api";
-import { Pause, Play } from "lucide-react";
+import { Pause, Play, Lock } from "lucide-react";
 import { toast } from "sonner";
+import { useAuth } from "../../AuthContext";
 
 const formatMs = (ms) => {
   if (ms <= 0) return "00:00";
@@ -12,14 +13,17 @@ const formatMs = (ms) => {
 };
 
 export default function MatchPrayerBreak({ match, userSide, isStaff, onUpdate }) {
+  const { user } = useAuth();
   const pb = match.match_prayer_break;
   const isActive = pb && !pb.resumed && pb.ends_at && new Date(pb.ends_at) > new Date();
+  const userCdUntil = user?.prayer_break_cooldown_until ? new Date(user.prayer_break_cooldown_until) : null;
+  const userInCooldown = userCdUntil && userCdUntil > new Date() && !isStaff;
   const [, force] = useState(0);
   useEffect(() => {
-    if (!isActive) return;
+    if (!isActive && !userInCooldown) return;
     const t = setInterval(() => force((n) => n + 1), 1000);
     return () => clearInterval(t);
-  }, [isActive]);
+  }, [isActive, userInCooldown]);
 
   const start = async () => {
     try {
@@ -46,6 +50,18 @@ export default function MatchPrayerBreak({ match, userSide, isStaff, onUpdate })
 
   if (!isActive) {
     if (!canStart) return null;
+    if (userInCooldown) {
+      const mins = Math.ceil((userCdUntil - new Date()) / 60000);
+      return (
+        <button
+          data-testid="match-prayer-locked"
+          disabled
+          className="px-3 py-1.5 rounded-md border border-white/10 text-white/40 text-sm flex items-center gap-1 cursor-not-allowed"
+        >
+          <Lock size={14} /> بريك صلاة (متاح بعد {mins}د)
+        </button>
+      );
+    }
     return (
       <button
         data-testid="match-prayer-start"

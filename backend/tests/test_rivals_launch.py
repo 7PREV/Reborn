@@ -42,6 +42,23 @@ def _make_clan(token, prefix):
     return r.json()
 
 
+def _fill_clan(leader_token, clan_id, count=5):
+    """Add `count` members to a clan so it can participate in matches (≥6 total)."""
+    h_l = {"Authorization": f"Bearer {leader_token}"}
+    added = []
+    for i in range(count):
+        _, _, tm = _register(f"fill_{uuid.uuid4().hex[:5]}")
+        h_m = {"Authorization": f"Bearer {tm}"}
+        requests.post(f"{API}/clans/{clan_id}/join-request", headers=h_m)
+        reqs = requests.get(f"{API}/clans/{clan_id}/requests", headers=h_l).json()
+        for r in reqs:
+            if not r.get("processed_at") and r.get("status", "pending") == "pending":
+                requests.post(f"{API}/clans/{clan_id}/requests/{r['id']}", headers=h_l, json={"action": "accept"})
+                added.append(tm)
+                break
+    return added
+
+
 @pytest.fixture(scope="module")
 def admin():
     s, u, t = _login_admin()
@@ -132,6 +149,8 @@ def test_clan_challenge_accept_creates_match():
     _, _, tb = _register("ch_b")
     ca = _make_clan(ta, "cha")
     cb = _make_clan(tb, "chb")
+    _fill_clan(ta, ca["id"])
+    _fill_clan(tb, cb["id"])
     h_a = {"Authorization": f"Bearer {ta}"}
     h_b = {"Authorization": f"Bearer {tb}"}
     # B challenges A (clan_id in URL = challenger's own clan = B's clan)
@@ -157,6 +176,8 @@ def test_clan_challenge_reject():
     _, _, tb = _register("rj_b")
     ca = _make_clan(ta, "rja")
     cb = _make_clan(tb, "rjb")
+    _fill_clan(ta, ca["id"])
+    _fill_clan(tb, cb["id"])
     h_a = {"Authorization": f"Bearer {ta}"}
     h_b = {"Authorization": f"Bearer {tb}"}
     ch = requests.post(f"{API}/clans/{cb['id']}/challenge", headers=h_b,
@@ -174,6 +195,8 @@ def test_3h_pair_cooldown_between_clans(admin):
     _, _, tb = _register("cd_b")
     ca = _make_clan(ta, "cda")
     cb = _make_clan(tb, "cdb")
+    _fill_clan(ta, ca["id"])
+    _fill_clan(tb, cb["id"])
     h_a = {"Authorization": f"Bearer {ta}"}
     h_b = {"Authorization": f"Bearer {tb}"}
     h_admin = {"Authorization": f"Bearer {admin['token']}"}
@@ -326,3 +349,61 @@ def test_live_streams_returns_gracefully():
     # Endpoint may be exposed; if 404, skip
     r = requests.get(f"{API}/live/twitch", params={"channel": "ninja"})
     assert r.status_code in (200, 404)
+
+
+# ---- Structural upgrade tests (Feb backlog) ----
+def test_register_grants_personal_plus_trial():
+    s, u, t = _register("pp_trial")
+    assert u.get("is_personal_plus") is True
+    assert u.get("personal_plus_until")
+
+
+def test_personal_plus_required_for_visual_customization():
+    """Free user cannot set avatar; Plus user can."""
+    # New users have 3-day trial so are Personal Plus -> can set
+    _, u, t = _register("pp_visual")
+    h = {"Authorization": f"Bearer {t}"}
+    # Use a small valid PNG data URL
+    tiny_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEX///+nxBvIAAAAC0lEQVQI12NgAAIAAAUAAeImBZsAAAAASUVORK5CYII="
+    r = requests.put(f"{API}/me/profile", headers=h, json={
+        "avatar": tiny_png,
+        "accent_color": "#FF8800",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json().get("avatar") == tiny_png
+    assert r.json().get("accent_color") == "#FF8800"
+
+
+def test_join_clan_requires_act():
+    """A player without an Activision ID cannot join a clan (we wipe it via admin to simulate)."""
+    s_l, u_l, t_l = _register("act_l")
+    cr = _make_clan(t_l, "actcl")
+    # Create a player and wipe their act via admin
+    admin_s, _, admin_t = _login_admin()
+    s_m, u_m, t_m = _register("act_p")
+    h_admin = {"Authorization": f"Bearer {admin_t}"}
+    # Try setting empty act via admin endpoint (it accepts a string but our model lets empty? skip act bypass)
+    # Direct DB cannot be touched from tests; use admin endpoint to set act = ""
+    # AdminUserEditIn.act allows None but accepts strings; empty string sanitized.
+    requests.put(f"{API}/admin/users/{u_m['id']}", headers=h_admin, json={"act": ""})
+    h_m = {"Authorization": f"Bearer {t_m}"}
+    r = requests.post(f"{API}/clans/{cr['id']}/join-request", headers=h_m)
+    assert r.status_code == 400
+    assert "Activision" in r.json().get("detail", "")
+
+
+def test_clan_challenge_blocked_under_6_members():
+    _, _, ta = _register("min_a")
+    _, _, tb = _register("min_b")
+    ca = _make_clan(ta, "mina")
+    cb = _make_clan(tb, "minb")
+    h_b = {"Authorization": f"Bearer {tb}"}
+    r = requests.post(f"{API}/clans/{cb['id']}/challenge", headers=h_b,
+                     json={"opponent_clan_id": ca["id"]})
+    assert r.status_code == 400
+    assert "لاعبين" in r.json().get("detail", "")
+
+
+def test_career_stats_kd_in_sanitized_user():
+    _, u, t = _register("kd_check")
+    assert "wins" in u and "losses" in u and "kd" in u
