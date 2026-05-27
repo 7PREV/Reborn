@@ -304,11 +304,13 @@ class MatchCreateIn(BaseModel):
     clan_a_id: str
     clan_b_id: str
     notes: Optional[str] = ""
+    league_id: Optional[str] = None
 
 
 class ChallengeIn(BaseModel):
     opponent_clan_id: str
     notes: Optional[str] = ""
+    league_id: Optional[str] = None
 
 
 class ChatMessageIn(BaseModel):
@@ -384,6 +386,7 @@ class CustomLeagueIn(BaseModel):
     game: str = Field(default="Call of Duty", min_length=2, max_length=40)
     rules: Optional[str] = ""
     description: Optional[str] = ""
+    rules_image: Optional[str] = ""  # base64 data URL OR external image URL
 
 
 class ScoreboardOCRIn(BaseModel):
@@ -893,6 +896,7 @@ async def create_challenge(clan_id: str, body: ChallengeIn, user: dict = Depends
         "opponent_name": opponent["name"],
         "opponent_tag": opponent["tag"],
         "notes": body.notes or "",
+        "league_id": body.league_id,
         "status": "pending",
         "created_by": user["id"],
         "created_at": iso(now_utc()),
@@ -954,6 +958,7 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
         "score_b": 0,
         "winner_clan_id": None,
         "notes": ch.get("notes", ""),
+        "league_id": ch.get("league_id"),
         "created_at": iso(now_utc()),
         "finished_at": None,
     }
@@ -971,6 +976,7 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
         m["id"],
         {"name": ch["challenger_name"], "tag": ch["challenger_tag"]},
         {"name": ch["opponent_name"], "tag": ch["opponent_tag"]},
+        league_id=ch.get("league_id"),
     ))
     return {"ok": True, "status": "accepted", "match": await _enrich_match(m)}
 
@@ -1105,6 +1111,7 @@ async def create_match(body: MatchCreateIn, user: dict = Depends(get_current_use
         "score_b": 0,
         "winner_clan_id": None,
         "notes": body.notes or "",
+        "league_id": body.league_id,
         "created_at": iso(now_utc()),
         "finished_at": None,
     }
@@ -1115,7 +1122,7 @@ async def create_match(body: MatchCreateIn, user: dict = Depends(get_current_use
         description="BO3 • Call of Duty — المباراة بدأت، تابع الشات الحي للحصول على آخر التحديثات!",
         color=0xFF3344,
     ))
-    asyncio.create_task(_ai_welcome_for_match(m["id"], a, b))
+    asyncio.create_task(_ai_welcome_for_match(m["id"], a, b, league_id=body.league_id))
     return await _enrich_match(m)
 
 
@@ -2904,16 +2911,24 @@ async def _league_rotation_loop() -> None:
 # ---------------- CUSTOM LEAGUES (multi-league system) ----------------
 @api.post("/leagues/custom")
 async def create_custom_league(body: CustomLeagueIn, user: dict = Depends(get_current_user)):
-    """Owner/Admin creates a custom league with its own name, game and rules.
+    """Owner/Admin creates a custom league with its own name, game, rules and rule image.
     Multiple custom leagues can run simultaneously."""
     if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
+    rules_image = (body.rules_image or "").strip()
+    if rules_image:
+        if rules_image.startswith("data:image/"):
+            if len(rules_image) > 4_500_000:  # ~3MB binary
+                raise HTTPException(400, "صورة القوانين كبيرة جداً (الحد 3MB)")
+        elif not rules_image.startswith("http"):
+            raise HTTPException(400, "صورة القوانين يجب أن تكون رابطاً أو ملف صورة")
     doc = {
         "id": str(uuid.uuid4()),
         "key": f"custom-{uuid.uuid4().hex[:8]}",
         "name": body.name,
         "game": body.game,
         "rules": body.rules or "",
+        "rules_image": rules_image,
         "description": body.description or "",
         "is_custom": True,
         "status": "active",
@@ -2925,7 +2940,37 @@ async def create_custom_league(body: CustomLeagueIn, user: dict = Depends(get_cu
     }
     await db.leagues.insert_one(doc)
     doc.pop("_id", None)
+    asyncio.create_task(_send_discord_embed(
+        title=f"🏆 دوري جديد مفتوح: {body.name}",
+        description=f"اللعبة: {body.game}\n{body.description or ''}",
+        color=0xFFCC00,
+    ))
     return doc
+
+
+@api.put("/leagues/{league_id}")
+async def update_custom_league(league_id: str, body: CustomLeagueIn, user: dict = Depends(get_current_user)):
+    """Owner/Admin edits a custom league (name, game, rules, image)."""
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    existing = await db.leagues.find_one({"id": league_id})
+    if not existing:
+        raise HTTPException(404, "الدوري غير موجود")
+    rules_image = (body.rules_image or "").strip()
+    if rules_image and not rules_image.startswith(("data:image/", "http")):
+        raise HTTPException(400, "صورة القوانين يجب أن تكون رابطاً أو ملف صورة")
+    await db.leagues.update_one(
+        {"id": league_id},
+        {"$set": {
+            "name": body.name,
+            "game": body.game,
+            "rules": body.rules or "",
+            "rules_image": rules_image,
+            "description": body.description or "",
+        }},
+    )
+    fresh = await db.leagues.find_one({"id": league_id}, {"_id": 0})
+    return fresh
 
 
 @api.get("/leagues/active")
@@ -3012,7 +3057,8 @@ async def _ai_chat(system_prompt: str, user_text: str, session_id: str,
         return ""
 
 
-async def _post_system_chat(match_id: str, text: str, username: str = "AI الحكم", role: str = "admin") -> None:
+async def _post_system_chat(match_id: str, text: str, image: Optional[str] = None,
+                            username: str = "AI الحكم", role: str = "admin") -> None:
     await db.chat_messages.insert_one({
         "id": str(uuid.uuid4()),
         "match_id": match_id,
@@ -3020,31 +3066,54 @@ async def _post_system_chat(match_id: str, text: str, username: str = "AI الح
         "username": username,
         "user_role": role,
         "user_clan_id": None,
-        "type": "text",
+        "type": "image" if image else "text",
         "text": text,
-        "image": None, "video": None,
+        "image": image,
+        "video": None,
         "opponent_decision": None, "admin_decision": None, "admin_note": "",
         "created_at": iso(now_utc()),
     })
 
 
-async def _ai_welcome_for_match(match_id: str, clan_a: dict, clan_b: dict) -> None:
+async def _ai_welcome_for_match(match_id: str, clan_a: dict, clan_b: dict,
+                                league_id: Optional[str] = None) -> None:
+    league = None
+    if league_id:
+        league = await db.leagues.find_one({"id": league_id}, {"_id": 0})
     if not EMERGENT_LLM_KEY:
-        await _post_system_chat(match_id,
-            f"🤖 مرحباً بكلان {clan_a['name']} وكلان {clan_b['name']}! ابدأوا BO3 — التزموا بقوانين الدوري.")
-        return
-    txt = await _ai_chat(
-        system_prompt=(
-            "أنت 'AI الحكم' في منصة Rivals لمباريات Call of Duty. "
-            "اكتب رسالة ترحيب قصيرة (سطرين كحد أقصى) باللغة العربية لكلانين متباريَين، "
-            "ذكّرهم بالاحترام، وحظ موفق. لا تستخدم رموز Markdown."
-        ),
-        user_text=f"اكتب الترحيب بين {clan_a['name']} ({clan_a['tag']}) و {clan_b['name']} ({clan_b['tag']}). BO3 Call of Duty.",
-        session_id=f"welcome-{match_id}",
-    )
-    if not txt:
-        txt = f"🤖 مرحباً {clan_a['name']} و{clan_b['name']}. حظ موفق في BO3 — التزموا الاحترام والقوانين."
-    await _post_system_chat(match_id, txt)
+        base = f"🤖 مرحباً بكلان {clan_a['name']} وكلان {clan_b['name']}! ابدأوا BO3 — التزموا بقوانين الدوري."
+        if league:
+            base = f"🤖 أهلاً بكم في **{league['name']}**\nاللعبة: {league.get('game','Call of Duty')}\n\n{base}"
+        await _post_system_chat(match_id, base)
+    else:
+        ctx = f"مرحب بـ {clan_a['name']} ({clan_a['tag']}) و {clan_b['name']} ({clan_b['tag']}). BO3 Call of Duty."
+        if league:
+            ctx += f" الدوري: {league['name']} — اللعبة: {league.get('game','Call of Duty')}."
+        txt = await _ai_chat(
+            system_prompt=(
+                "أنت 'AI الحكم' في منصة Rivals لمباريات Call of Duty. "
+                "اكتب رسالة ترحيب قصيرة (سطرين كحد أقصى) باللغة العربية لكلانين متباريَين، "
+                "ذكّرهم بالاحترام، وحظ موفق. لا تستخدم رموز Markdown."
+            ),
+            user_text=ctx,
+            session_id=f"welcome-{match_id}",
+        )
+        if not txt:
+            txt = f"🤖 مرحباً {clan_a['name']} و{clan_b['name']}. حظ موفق في BO3 — التزموا الاحترام والقوانين."
+        if league:
+            txt = f"🏆 {league['name']}\n{txt}"
+        await _post_system_chat(match_id, txt)
+    # If the league has text rules, post them as a separate chat message
+    if league and (league.get("rules") or "").strip():
+        rules_msg = f"📜 قوانين {league['name']}:\n{league['rules']}"
+        await _post_system_chat(match_id, rules_msg)
+    # If the league has a rules image, post it as an image message
+    if league and (league.get("rules_image") or "").strip():
+        await _post_system_chat(
+            match_id,
+            f"🖼️ إعدادات المباراة في {league['name']}",
+            image=league["rules_image"],
+        )
 
 
 async def _ai_toxicity_check(match_id: str, msg_id: str, user_id: str, username: str, text: str) -> None:

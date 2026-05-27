@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search, Edit3, Mail, KeyRound, X, Zap } from "lucide-react";
+import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search, Edit3, Mail, KeyRound, X, Zap, Plus, Image as ImageIcon, Gamepad2 } from "lucide-react";
 import { toast } from "sonner";
 import BannerManager from "../components/admin/BannerManager";
 
@@ -321,6 +321,214 @@ function PasswordResetsPanel() {
   );
 }
 
+function LeaguesManager() {
+  const [leagues, setLeagues] = useState([]);
+  const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({ name: "", game: "Call of Duty", rules: "", description: "", rules_image: "" });
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const { data } = await api.get("/leagues/active");
+      setLeagues(data);
+    } catch (err) {
+      // benign
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const reset = () => {
+    setForm({ name: "", game: "Call of Duty", rules: "", description: "", rules_image: "" });
+    setCreating(false);
+    setEditing(null);
+  };
+
+  const onImage = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 3_000_000) return toast.error("الصورة كبيرة (الحد 3MB)");
+    const fr = new FileReader();
+    fr.onload = () => setForm((p) => ({ ...p, rules_image: fr.result }));
+    fr.readAsDataURL(f);
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.name || !form.game) return toast.error("الاسم واللعبة إلزاميان");
+    setBusy(true);
+    try {
+      if (editing) {
+        await api.put(`/leagues/${editing}`, form);
+        toast.success("تم تحديث الدوري");
+      } else {
+        await api.post("/leagues/custom", form);
+        toast.success("تم إنشاء الدوري");
+      }
+      reset();
+      load();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const finishLeague = async (lid) => {
+    // eslint-disable-next-line no-alert
+    if (!confirm("إنهاء هذا الدوري ومنح الشارة لصاحب أعلى النقاط؟")) return;
+    try {
+      await api.post(`/leagues/${lid}/finish`);
+      toast.success("تم الإنهاء ومنح الشارة");
+      load();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    }
+  };
+
+  const startEdit = (lg) => {
+    setEditing(lg.id);
+    setForm({
+      name: lg.name, game: lg.game,
+      rules: lg.rules || "", description: lg.description || "",
+      rules_image: lg.rules_image || "",
+    });
+    setCreating(true);
+  };
+
+  return (
+    <section data-testid="leagues-manager">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <h2 className="font-display font-black text-2xl flex items-center gap-2">
+          <Gamepad2 className="text-gold-500" /> إدارة الدوريات المتعددة
+        </h2>
+        {!creating && (
+          <button
+            data-testid="open-league-form"
+            onClick={() => setCreating(true)}
+            className="px-3 py-2 rounded-md bg-gold-500 text-black text-sm font-bold hover:bg-gold-400 flex items-center gap-1"
+          >
+            <Plus size={14} /> دوري جديد
+          </button>
+        )}
+      </div>
+
+      {creating && (
+        <form onSubmit={submit} className="bg-surface border b-soft rounded-xl p-5 space-y-3 mb-4" data-testid="league-form">
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">اسم الدوري</label>
+              <input
+                data-testid="league-name"
+                required minLength={2} maxLength={80}
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="دوري الأبطال - الموسم الأول"
+                className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm focus:border-gold-500/40"
+              />
+            </div>
+            <div>
+              <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">اللعبة</label>
+              <input
+                data-testid="league-game"
+                required minLength={2} maxLength={40}
+                value={form.game}
+                onChange={(e) => setForm({ ...form, game: e.target.value })}
+                placeholder="Call of Duty MW3"
+                className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm focus:border-gold-500/40"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">وصف</label>
+            <input
+              data-testid="league-description"
+              value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              placeholder="بطولة خاصة بـ Plus، 8 كلانات، خروج المغلوب"
+              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">قوانين الدوري (نص)</label>
+            <textarea
+              data-testid="league-rules"
+              value={form.rules}
+              onChange={(e) => setForm({ ...form, rules: e.target.value })}
+              placeholder="مثال: BO3 - 5v5 - الخريطة الممنوعة Nuketown - الأسلحة المسموحة..."
+              rows={4}
+              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm resize-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">صورة القوانين (اختياري — ≤3MB)</label>
+            <div className="flex items-start gap-3 flex-wrap">
+              <label className="cursor-pointer inline-flex items-center gap-2 px-3 py-2 rounded-md bg-background border b-soft hover:border-gold-500/40 text-sm">
+                <ImageIcon size={14} />
+                <span>اختر صورة</span>
+                <input data-testid="league-image-input" type="file" accept="image/*" onChange={onImage} className="hidden" />
+              </label>
+              <input
+                data-testid="league-image-url"
+                value={form.rules_image.startsWith("http") ? form.rules_image : ""}
+                onChange={(e) => setForm({ ...form, rules_image: e.target.value })}
+                placeholder="أو ألصق رابط صورة (https://...)"
+                className="flex-1 min-w-[200px] bg-background border b-soft rounded-md px-3 py-2 outline-none text-sm"
+              />
+              {form.rules_image && (
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, rules_image: "" })}
+                  className="px-2 py-1 text-xs text-destructive hover:bg-destructive/10 rounded"
+                >
+                  حذف الصورة
+                </button>
+              )}
+            </div>
+            {form.rules_image && (
+              <img src={form.rules_image} alt="rules" className="mt-3 rounded max-h-44 border b-soft" />
+            )}
+          </div>
+          <div className="flex items-center gap-2 justify-end">
+            <button type="button" onClick={reset} className="px-3 py-2 rounded text-sm hover:bg-white/5">إلغاء</button>
+            <button data-testid="league-submit" type="submit" disabled={busy} className="px-4 py-2 rounded bg-gold-500 text-black text-sm font-bold hover:bg-gold-400 disabled:opacity-50">
+              {busy ? "..." : editing ? "حفظ" : "إنشاء الدوري"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      <div className="bg-surface border b-soft rounded-lg divide-y divide-white/5">
+        {leagues.length === 0 && (
+          <div className="p-6 text-center text-white/40 text-sm">لا توجد دوريات نشطة بعد</div>
+        )}
+        {leagues.map((lg) => (
+          <div key={lg.id} data-testid={`league-row-${lg.id}`} className="p-3 flex items-center gap-3 flex-wrap">
+            <div className="h-10 w-10 rounded-md bg-gold-500/10 grid place-items-center text-gold-500">
+              <Trophy size={18} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-bold truncate">{lg.name}</div>
+              <div className="text-[10px] text-white/40">
+                {lg.game} • {lg.is_custom ? "مخصص" : "شهري"}
+                {lg.rules_image && <span className="text-gold-500"> • صورة قوانين ✓</span>}
+              </div>
+            </div>
+            <button data-testid={`edit-league-${lg.id}`} onClick={() => startEdit(lg)} className="px-2 py-1 rounded text-xs bg-white/5 hover:bg-white/10 flex items-center gap-1">
+              <Edit3 size={12} /> تعديل
+            </button>
+            {lg.is_custom && (
+              <button data-testid={`finish-league-${lg.id}`} onClick={() => finishLeague(lg.id)} className="px-2 py-1 rounded text-xs bg-gold-500/10 text-gold-500 hover:bg-gold-500/20">
+                إنهاء ومنح الشارة
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function OwnerPlusGrants() {
   const { user } = useAuth();
   const [userQuery, setUserQuery] = useState("");
@@ -523,6 +731,7 @@ export default function AdminPage() {
       )}
 
       <UserRoleManager />
+      <LeaguesManager />
       <OwnerPlusGrants />
       <ClanEditor />
       <PasswordResetsPanel />
