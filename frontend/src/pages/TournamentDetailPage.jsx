@@ -13,7 +13,7 @@ function Bracket({ bracket, clans, champion }) {
     <div className="overflow-x-auto pb-4">
       <div className="flex gap-4 min-w-max">
         {bracket.map((round, ri) => (
-          <div key={ri} className="flex flex-col gap-4 justify-around min-w-[200px]">
+          <div key={`r-${ri}`} className="flex flex-col gap-4 justify-around min-w-[200px]">
             <div className="text-xs uppercase tracking-widest text-gold-500 text-center mb-2">
               {ri === bracket.length - 1 ? "النهائي" : `الجولة ${ri + 1}`}
             </div>
@@ -23,7 +23,7 @@ function Bracket({ bracket, clans, champion }) {
               const winA = slot.winner_id === slot.clan_a_id;
               const winB = slot.winner_id === slot.clan_b_id;
               return (
-                <div key={si} className="bg-surface border b-soft rounded-md overflow-hidden" data-testid={`bracket-${ri}-${si}`}>
+                <div key={slot.match_id || `slot-${ri}-${si}`} className="bg-surface border b-soft rounded-md overflow-hidden" data-testid={`bracket-${ri}-${si}`}>
                   <SlotLine clan={a} win={winA} bye={!a} />
                   <div className="border-t b-soft" />
                   <SlotLine clan={b} win={winB} bye={!b} />

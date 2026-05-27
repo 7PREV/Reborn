@@ -105,8 +105,8 @@ export default function PersonalPlusPage() {
                 <span className="text-white/40 text-sm">ر.س / {t.duration}</span>
               </div>
               <ul className="mt-6 space-y-2.5 text-sm">
-                {t.perks.map((p, i) => (
-                  <li key={i} className="flex items-start gap-2 text-white/80">
+                {t.perks.map((p) => (
+                  <li key={p} className="flex items-start gap-2 text-white/80">
                     <Check size={15} className="mt-0.5 shrink-0" style={{ color: t.accent }} />
                     <span>{p}</span>
                   </li>

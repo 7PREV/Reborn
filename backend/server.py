@@ -1303,8 +1303,6 @@ async def withdraw_match(match_id: str, user: dict = Depends(get_current_user)):
     b = await _get_clan(match["clan_b_id"])
     staff_a = [a["leader_id"]] + a.get("vice_leader_ids", [])
     staff_b = [b["leader_id"]] + b.get("vice_leader_ids", [])
-    withdrawing_clan: str
-    winning_clan: str
     if user["id"] in staff_a:
         withdrawing_clan, winning_clan = a["id"], b["id"]
     elif user["id"] in staff_b:
