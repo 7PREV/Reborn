@@ -49,7 +49,7 @@ export default function LeaderboardPage() {
               const wins = row.wins || 0;
               const losses = row.losses || 0;
               const kd = row.kd != null ? row.kd : (losses === 0 ? wins.toFixed(2) : (wins / losses).toFixed(2));
-              const isPlus = tab === "clans" ? row.is_plus : row.is_personal_plus;
+              const isPlus = tab === "clans" ? (row.is_clan_plus || row.is_plus) : row.is_personal_plus;
               return (
                 <tr key={row.id} data-testid={`lb-row-${idx}`} className="border-t b-soft hover:bg-white/[0.03] transition">
                   <td className="py-3 px-4">
@@ -62,11 +62,21 @@ export default function LeaderboardPage() {
                   </td>
                   <td className="py-3 px-4">
                     {tab === "clans" ? (
-                      <Link to={`/clans/${row.id}`} className={`inline-flex items-center gap-3 hover:text-gold-500 ${isPlus ? "plus-glow rounded-md px-2 py-1" : ""}`}>
+                      <Link to={`/clans/${row.id}`} className={`inline-flex items-center gap-2 hover:text-gold-500 ${isPlus ? "plus-glow rounded-md px-2 py-1" : ""}`}>
                         <Shield size={18} className="text-gold-500/70" />
                         <span className="font-bold">{row.name}</span>
                         <span className="text-xs text-white/40">[{row.tag}]</span>
                         {isPlus && <Crown size={12} className="text-gold-500" />}
+                        {(row.badges || []).slice(0, 3).map((b) => (
+                          <span
+                            key={b.id}
+                            title={b.label}
+                            data-testid={`badge-${row.id}-${b.id}`}
+                            className="inline-flex items-center gap-1 text-[10px] uppercase tracking-widest bg-gold-500/15 text-gold-500 border border-gold-500/30 rounded px-1.5 py-0.5"
+                          >
+                            <Trophy size={10} /> {b.label.length > 18 ? b.label.slice(0, 18) + "…" : b.label}
+                          </span>
+                        ))}
                       </Link>
                     ) : (
                       <Link to={`/players/${row.id}`} data-testid={`lb-player-${row.id}`} className={`inline-flex items-center gap-3 hover:text-gold-500 ${isPlus ? "plus-glow rounded-md px-2 py-1" : ""}`}>

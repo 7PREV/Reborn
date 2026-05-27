@@ -98,6 +98,43 @@ function ActionBar({ canJoin, isFull, isStaff, isMember, isLeader, onJoin, onCha
   );
 }
 
+function LeaguesJoin({ clanId, clanLeagueIds, leagues, reload }) {
+  const join = async (lid) => {
+    try {
+      await api.post(`/leagues/${lid}/join`);
+      toast.success("تم التسجيل في الدوري");
+      reload();
+    } catch (err) { handleErr(err); }
+  };
+  if (!leagues || leagues.length === 0) return null;
+  return (
+    <section data-testid="leagues-join" className="bg-surface border b-soft rounded-xl p-6">
+      <h2 className="font-display font-black text-2xl mb-3 flex items-center gap-2">
+        <Trophy className="text-gold-500" /> الدوريات المتاحة
+      </h2>
+      <div className="grid sm:grid-cols-2 gap-3">
+        {leagues.map((lg) => {
+          const isJoined = clanLeagueIds.includes(lg.id);
+          return (
+            <div key={lg.id} className="bg-background border b-soft rounded-lg p-3 flex items-center gap-3" data-testid={`league-${lg.id}`}>
+              <Trophy size={16} className="text-gold-500" />
+              <div className="flex-1 min-w-0">
+                <div className="font-display font-bold text-sm truncate">{lg.name}</div>
+                <div className="text-[10px] text-white/40">{lg.game} • {lg.is_custom ? "مخصص" : "شهري"}</div>
+              </div>
+              {isJoined ? (
+                <span className="text-[10px] uppercase bg-emerald-500/10 text-emerald-400 px-2 py-1 rounded">مسجّل</span>
+              ) : (
+                <button data-testid={`join-league-${lg.id}`} onClick={() => join(lg.id)} className="px-2 py-1 rounded text-xs bg-gold-500 text-black font-bold hover:bg-gold-400">سجّل الكلان</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function TrophyRoom({ trophies }) {
   if (!trophies || trophies.length === 0) {
     return (
@@ -205,6 +242,7 @@ export default function ClanDetailPage() {
   const [requests, setRequests] = useState([]);
   const [allClans, setAllClans] = useState([]);
   const [challenges, setChallenges] = useState([]);
+  const [leagues, setLeagues] = useState([]);
   const [showChallenge, setShowChallenge] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteSearch, setInviteSearch] = useState("");
@@ -244,6 +282,7 @@ export default function ClanDetailPage() {
   useEffect(() => {
     load();
     api.get("/online-clans").then((r) => setAllClans(r.data)).catch(() => {});
+    api.get("/leagues/active").then((r) => setLeagues(r.data)).catch(() => {});
   }, [load]);
 
   // Roles / states derived from clan + user
@@ -392,6 +431,9 @@ export default function ClanDetailPage() {
       />
 
       <TrophyRoom trophies={clan.trophies || []} />
+      {flags.isStaff && (
+        <LeaguesJoin clanId={clan.id} clanLeagueIds={clan.league_ids || []} leagues={leagues} reload={load} />
+      )}
 
       <section>
         <h2 className="font-display font-black text-2xl mb-4">

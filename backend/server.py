@@ -19,11 +19,11 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 
 # ---------------- Setup ----------------
-mongo_url = os.environ['MONGO_URL']
+mongo_url = os.environ.get('MONGO_URL') or "mongodb://localhost:27017"
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ.get('DB_NAME', 'rivals')]
 
-JWT_SECRET = os.environ['JWT_SECRET']
+JWT_SECRET = os.environ.get('JWT_SECRET', 'rivals-dev-jwt-secret-change-me')
 JWT_ALG = "HS256"
 ACCESS_MIN = 60 * 24
 
@@ -377,6 +377,18 @@ class BlacklistIn(BaseModel):
     cheat_tool: str = Field(min_length=1, max_length=120)
     details: Optional[str] = ""
     proof_image: Optional[str] = ""  # base64 data URL or upload URL
+
+
+class CustomLeagueIn(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    game: str = Field(default="Call of Duty", min_length=2, max_length=40)
+    rules: Optional[str] = ""
+    description: Optional[str] = ""
+
+
+class ScoreboardOCRIn(BaseModel):
+    image_b64: str  # data URL or raw base64 PNG/JPEG
+    league_id: Optional[str] = None  # if set, K/D updates count toward that league
 
 
 # ---------------- Startup ----------------
@@ -955,6 +967,11 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
         description="تم قبول التحدي — البطولة تشتعل!",
         color=0xFF3344,
     ))
+    asyncio.create_task(_ai_welcome_for_match(
+        m["id"],
+        {"name": ch["challenger_name"], "tag": ch["challenger_tag"]},
+        {"name": ch["opponent_name"], "tag": ch["opponent_tag"]},
+    ))
     return {"ok": True, "status": "accepted", "match": await _enrich_match(m)}
 
 
@@ -1098,6 +1115,7 @@ async def create_match(body: MatchCreateIn, user: dict = Depends(get_current_use
         description="BO3 • Call of Duty — المباراة بدأت، تابع الشات الحي للحصول على آخر التحديثات!",
         color=0xFF3344,
     ))
+    asyncio.create_task(_ai_welcome_for_match(m["id"], a, b))
     return await _enrich_match(m)
 
 
@@ -1547,6 +1565,11 @@ async def post_chat(match_id: str, body: ChatMessageIn, user: dict = Depends(get
     msg = _build_chat_message(body, user, match_id, _determine_chat_role(user, a, b))
     await db.chat_messages.insert_one(msg)
     msg.pop("_id", None)
+    # Fire-and-forget AI toxicity scan for text messages
+    if msg.get("type") == "text" and (msg.get("text") or "").strip():
+        asyncio.create_task(_ai_toxicity_check(
+            match_id, msg["id"], user["id"], user["username"], msg["text"]
+        ))
     return msg
 
 
@@ -1590,12 +1613,48 @@ async def admin_chat_decision(msg_id: str, body: AdminMediaDecisionIn, user: dic
 
 
 # ---------------- LEADERBOARD ----------------
+def _clan_is_plus(c: dict) -> bool:
+    if c.get("is_plus"):
+        return True
+    until = c.get("plus_until")
+    if not until:
+        return False
+    try:
+        return datetime.fromisoformat(until) > now_utc()
+    except Exception:
+        return False
+
+
+def _clan_badges(c: dict) -> list:
+    """Return compact badge dicts for the leaderboard UI."""
+    out = []
+    for t in c.get("trophies", []):
+        out.append({
+            "id": t.get("id"),
+            "kind": t.get("kind"),
+            "label": t.get("label"),
+            "awarded_at": t.get("awarded_at"),
+        })
+    return out
+
+
 @api.get("/leaderboard/clans")
-async def leaderboard_clans():
+async def leaderboard_clans(league_id: Optional[str] = None):
+    """Leaderboard clans. When `league_id` is given, restrict to clans currently
+    participating in that custom league."""
+    query = {"archived": {"$ne": True}}
+    if league_id:
+        query["league_ids"] = league_id
     docs = await db.clans.find(
-        {"archived": {"$ne": True}},
-        {"_id": 0, "id": 1, "name": 1, "tag": 1, "points": 1, "wins": 1, "losses": 1, "trophies": 1}
+        query,
+        {"_id": 0, "id": 1, "name": 1, "tag": 1, "points": 1, "wins": 1, "losses": 1,
+         "trophies": 1, "is_plus": 1, "plus_until": 1, "league_ids": 1}
     ).sort("points", -1).limit(50).to_list(50)
+    for c in docs:
+        c["is_clan_plus"] = _clan_is_plus(c)
+        c["badges"] = _clan_badges(c)
+        wins, losses = c.get("wins", 0), c.get("losses", 0)
+        c["kd"] = compute_kd(wins, losses)
     return docs
 
 
@@ -2840,6 +2899,295 @@ async def _league_rotation_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             logger.error(f"League rotation error: {exc}")
         await asyncio.sleep(3600)
+
+
+# ---------------- CUSTOM LEAGUES (multi-league system) ----------------
+@api.post("/leagues/custom")
+async def create_custom_league(body: CustomLeagueIn, user: dict = Depends(get_current_user)):
+    """Owner/Admin creates a custom league with its own name, game and rules.
+    Multiple custom leagues can run simultaneously."""
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "key": f"custom-{uuid.uuid4().hex[:8]}",
+        "name": body.name,
+        "game": body.game,
+        "rules": body.rules or "",
+        "description": body.description or "",
+        "is_custom": True,
+        "status": "active",
+        "started_at": iso(now_utc()),
+        "finished_at": None,
+        "champion_clan_id": None,
+        "champion_clan_name": None,
+        "created_by": user["id"],
+    }
+    await db.leagues.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/leagues/active")
+async def list_active_leagues():
+    docs = await db.leagues.find({"status": "active"}, {"_id": 0}).sort("started_at", -1).to_list(50)
+    return docs
+
+
+@api.post("/leagues/{league_id}/join")
+async def join_league(league_id: str, user: dict = Depends(get_current_user)):
+    """Clan leader (or staff) registers their clan into a custom league."""
+    league = await db.leagues.find_one({"id": league_id})
+    if not league:
+        raise HTTPException(404, "الدوري غير موجود")
+    if not user.get("clan_id"):
+        raise HTTPException(400, "يجب أن تكون في كلان")
+    clan = await _get_clan(user["clan_id"])
+    if not _is_clan_staff(clan, user) and not is_staff(user):
+        raise HTTPException(403, "فقط القائد أو نائبه")
+    _assert_clan_can_match(clan)
+    await db.clans.update_one({"id": clan["id"]}, {"$addToSet": {"league_ids": league_id}})
+    return {"ok": True}
+
+
+@api.post("/leagues/{league_id}/finish")
+async def finish_custom_league(league_id: str, user: dict = Depends(get_current_user)):
+    """Owner/Admin closes a custom league and awards the badge to the top-points
+    participating clan."""
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    league = await db.leagues.find_one({"id": league_id})
+    if not league:
+        raise HTTPException(404, "غير موجود")
+    if league.get("status") != "active":
+        raise HTTPException(400, "الدوري ليس نشطاً")
+    top = await db.clans.find_one(
+        {"league_ids": league_id, "archived": {"$ne": True}},
+        {"_id": 0}, sort=[("points", -1)],
+    )
+    update = {"status": "finished", "finished_at": iso(now_utc())}
+    if top:
+        update["champion_clan_id"] = top["id"]
+        update["champion_clan_name"] = top["name"]
+        await db.clans.update_one(
+            {"id": top["id"]},
+            {"$push": {"trophies": {
+                "id": str(uuid.uuid4()),
+                "kind": "league",
+                "label": f"بطل {league['name']}",
+                "league_key": league.get("key"),
+                "league_id": league_id,
+                "awarded_at": iso(now_utc()),
+            }}}
+        )
+    await db.leagues.update_one({"id": league_id}, {"$set": update})
+    return {"ok": True, "champion_clan_id": update.get("champion_clan_id")}
+
+
+# ---------------- AI: welcome bot + toxicity monitor + scoreboard OCR ----------------
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "").strip()
+_AI_MODEL_PROVIDER = ("openai", "gpt-5.4")  # default per integration playbook
+
+
+async def _ai_chat(system_prompt: str, user_text: str, session_id: str,
+                   image_b64: Optional[str] = None, max_chars: int = 4000) -> str:
+    """Single-shot AI call. Returns the model's text reply or '' on failure."""
+    if not EMERGENT_LLM_KEY:
+        return ""
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=session_id,
+            system_message=system_prompt,
+        ).with_model(*_AI_MODEL_PROVIDER)
+        kwargs = {"text": user_text[:max_chars]}
+        if image_b64:
+            raw = image_b64.split(",", 1)[1] if image_b64.startswith("data:") else image_b64
+            kwargs["file_contents"] = [ImageContent(image_base64=raw)]
+        resp = await chat.send_message(UserMessage(**kwargs))
+        return (resp or "").strip()
+    except Exception as exc:
+        logger.warning(f"AI chat error: {exc}")
+        return ""
+
+
+async def _post_system_chat(match_id: str, text: str, username: str = "AI الحكم", role: str = "admin") -> None:
+    await db.chat_messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": "ai-bot",
+        "username": username,
+        "user_role": role,
+        "user_clan_id": None,
+        "type": "text",
+        "text": text,
+        "image": None, "video": None,
+        "opponent_decision": None, "admin_decision": None, "admin_note": "",
+        "created_at": iso(now_utc()),
+    })
+
+
+async def _ai_welcome_for_match(match_id: str, clan_a: dict, clan_b: dict) -> None:
+    if not EMERGENT_LLM_KEY:
+        await _post_system_chat(match_id,
+            f"🤖 مرحباً بكلان {clan_a['name']} وكلان {clan_b['name']}! ابدأوا BO3 — التزموا بقوانين الدوري.")
+        return
+    txt = await _ai_chat(
+        system_prompt=(
+            "أنت 'AI الحكم' في منصة Rivals لمباريات Call of Duty. "
+            "اكتب رسالة ترحيب قصيرة (سطرين كحد أقصى) باللغة العربية لكلانين متباريَين، "
+            "ذكّرهم بالاحترام، وحظ موفق. لا تستخدم رموز Markdown."
+        ),
+        user_text=f"اكتب الترحيب بين {clan_a['name']} ({clan_a['tag']}) و {clan_b['name']} ({clan_b['tag']}). BO3 Call of Duty.",
+        session_id=f"welcome-{match_id}",
+    )
+    if not txt:
+        txt = f"🤖 مرحباً {clan_a['name']} و{clan_b['name']}. حظ موفق في BO3 — التزموا الاحترام والقوانين."
+    await _post_system_chat(match_id, txt)
+
+
+async def _ai_toxicity_check(match_id: str, msg_id: str, user_id: str, username: str, text: str) -> None:
+    """Background task — analyses message, logs warning + posts AI warning if toxic."""
+    if not text.strip() or not EMERGENT_LLM_KEY:
+        return
+    raw = await _ai_chat(
+        system_prompt=(
+            "You are a strict bilingual (Arabic+English) chat moderator for an esports platform. "
+            "Decide if the user's message is TOXIC: insults, slurs, harassment, threats, hate speech. "
+            "Reply with ONLY a compact JSON object on one line: "
+            '{"is_toxic": true|false, "severity": "low"|"medium"|"high", "reason": "short reason in Arabic"}. '
+            "No prose, no markdown."
+        ),
+        user_text=text,
+        session_id=f"tox-{match_id}-{msg_id}",
+        max_chars=600,
+    )
+    if not raw:
+        return
+    import json
+    try:
+        snippet = raw.strip()
+        if snippet.startswith("```"):
+            snippet = snippet.strip("`").split("\n", 1)[-1]
+        if snippet.endswith("```"):
+            snippet = snippet.rsplit("```", 1)[0]
+        # Extract first {...}
+        i = snippet.find("{")
+        j = snippet.rfind("}")
+        if i >= 0 and j >= 0:
+            snippet = snippet[i:j+1]
+        data = json.loads(snippet)
+    except Exception:
+        return
+    if not data.get("is_toxic"):
+        return
+    log = {
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "message_id": msg_id,
+        "user_id": user_id,
+        "username": username,
+        "original_text": text,
+        "severity": data.get("severity", "low"),
+        "reason": data.get("reason", "")[:240],
+        "created_at": iso(now_utc()),
+    }
+    await db.toxicity_log.insert_one(log)
+    warn = f"⚠️ تحذير من AI الحكم: @{username} — {log['reason']}. خفّف الحدّة من فضلك."
+    await _post_system_chat(match_id, warn)
+
+
+@api.get("/admin/toxicity-log")
+async def admin_toxicity_log(user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    docs = await db.toxicity_log.find({}, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
+    return docs
+
+
+@api.post("/matches/{match_id}/scoreboard")
+async def scoreboard_ocr(match_id: str, body: ScoreboardOCRIn, user: dict = Depends(get_current_user)):
+    """AI-Vision OCR for a Call of Duty endgame scoreboard. Updates each detected
+    player's permanent K/D stats. Returns the parsed rows + a chat-bot summary."""
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    side = _user_side(user, a, b)
+    if not side and not is_staff(user):
+        raise HTTPException(403, "فقط القائد/النائب أو المنظم")
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(503, "خدمة الذكاء الاصطناعي غير مفعلة")
+    raw = await _ai_chat(
+        system_prompt=(
+            "You receive a Call of Duty endgame scoreboard screenshot. "
+            "Extract every visible player row. "
+            'Reply with ONLY a JSON object: {"rows":[{"username":"...","kills":N,"deaths":N}]}. '
+            "No prose, no markdown, no explanation. Skip rows you cannot read confidently."
+        ),
+        user_text="Extract the scoreboard rows as JSON.",
+        session_id=f"ocr-{match_id}-{uuid.uuid4().hex[:6]}",
+        image_b64=body.image_b64,
+        max_chars=400,
+    )
+    if not raw:
+        raise HTTPException(502, "فشل التعرف على الصورة")
+    import json
+    rows = []
+    try:
+        snippet = raw.strip()
+        if snippet.startswith("```"):
+            snippet = snippet.strip("`").split("\n", 1)[-1]
+        if snippet.endswith("```"):
+            snippet = snippet.rsplit("```", 1)[0]
+        i = snippet.find("{")
+        j = snippet.rfind("}")
+        if i >= 0 and j >= 0:
+            snippet = snippet[i:j+1]
+        data = json.loads(snippet)
+        for r in (data.get("rows") or []):
+            uname = str(r.get("username", "")).strip()
+            try:
+                k = int(r.get("kills", 0))
+                d = int(r.get("deaths", 0))
+            except Exception:
+                continue
+            if uname and 0 <= k < 200 and 0 <= d < 200:
+                rows.append({"username": uname, "kills": k, "deaths": d})
+    except Exception as exc:
+        logger.warning(f"OCR parse error: {exc}; raw={raw[:200]}")
+        raise HTTPException(502, "تعذّر قراءة لوحة النتائج")
+    # Map detected usernames to users by case-insensitive `act` or `username`.
+    matched, unmatched = [], []
+    for r in rows:
+        u = await db.users.find_one(
+            {"$or": [
+                {"act": {"$regex": f"^{r['username']}$", "$options": "i"}},
+                {"username": {"$regex": f"^{r['username']}$", "$options": "i"}},
+            ]},
+            {"_id": 0, "id": 1, "username": 1, "act": 1, "wins": 1, "losses": 1, "kd_stats": 1},
+        )
+        if u:
+            await db.users.update_one(
+                {"id": u["id"]},
+                {"$inc": {
+                    "kd_stats.kills": r["kills"],
+                    "kd_stats.deaths": r["deaths"],
+                    "kd_stats.games": 1,
+                }},
+            )
+            matched.append({**r, "user_id": u["id"]})
+        else:
+            unmatched.append(r)
+    summary_lines = [f"🎯 تم تحديث K/D من لوحة النتائج. {len(matched)} لاعب تم رصدهم"]
+    for m in matched[:8]:
+        summary_lines.append(f"• {m['username']}: {m['kills']}/{m['deaths']}")
+    if unmatched:
+        summary_lines.append(f"({len(unmatched)} اسم لم نتطابق معه)")
+    await _post_system_chat(match_id, "\n".join(summary_lines))
+    return {"ok": True, "rows": rows, "matched": matched, "unmatched": unmatched}
 
 
 app.include_router(api)

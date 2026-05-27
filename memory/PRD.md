@@ -1,82 +1,78 @@
 # RIVALS — Arabic Esports Platform (Call of Duty)
 
-## Problem Statement (Original)
-بناء موقع رياضات إلكترونية: تسجيل بريد، كلانات بقادة ونواب ولاعبين، طلبات انضمام ودعوات، تحكم القائد، شات خاص أثناء المباراة (مرئي للمنظمين والكلانَين فقط، يكتب فيه القائد ونائبه والإدارة فقط)، لوحة نتائج، مباريات حية، تاريخ 24 ساعة، بحث كلان وبحث لاعب.
+## Problem Statement
+Build a full-stack Arabic COD esports platform: email auth, clans with leaders/vices/players, join requests, invites, leader controls, private match chat (visible only to staff + both clans), BO3 map voting, dispute resolution, 24h history, search, leaderboards, knockout tournaments, point system (+3 / -1 / -3), homepage banner carousel.
 
-## User Choices
-- Auth: Email/password + JWT HttpOnly cookies
-- Chat: Text + Image + Video (24h auto-cleanup)
-- Game: Call of Duty only (BO3)
-- Theme: Modern dark with gold accents, RTL Arabic
-- Stream: Twitch (real-time API), Kick (best-effort public), TikTok (link only)
-- Email: Forgot-password MOCKED (admin dashboard shows pending tokens — waiting on Resend/SendGrid key)
+## Stack
+- Backend: FastAPI + Motor (async MongoDB), JWT HttpOnly cookies + Bearer fallback
+- Frontend: React 19 + Tailwind + shadcn + lucide-react + sonner (RTL Arabic)
+- AI: emergentintegrations + Emergent Universal Key (GPT-5.4 text + vision)
+- Storage: disk for videos, base64 for images/banners/avatars; ObjectId always excluded
+- Bg tasks: hourly chat/video cleanup + hourly league rotation
 
-## Implemented (May 2026 — latest)
+## Implemented Feature Set (May 2026 → Feb 2026)
 ### Core
-- JWT HttpOnly cookie auth + Bearer fallback
-- Clans CRUD, roles (leader/vice/player), kick/promote/leave
-- Membership caps (7 default / 12 Plus), vice caps (1 / 2 Plus)
-- Plus toggle (free during preview) + 7-day Plus reward when clan fills
-- Join requests + invites flow
-- Matches BO3 with map voting + admin dispute resolve
-- Withdraw mechanism (-3 / +3)
-- Chat with text/image/video uploads (500MB Plus / 100MB Free) — disk storage
-- 24h auto-cleanup background task for chat + video files
-- Leaderboards (clans + players), live + 24h history
-- Player/clan search, Rules CRUD
-- Tournaments (single-elim, byes, BO3 matches per round, champion trophy)
-- Hero banner ad carousel (Owner-managed)
-- Owner role (Prev) + admin role hierarchy
+- JWT cookie auth, role hierarchy (owner/admin/leader/vice/player)
+- Clans CRUD + caps (7/12 with Plus) + 1/2 vices
+- Match BO3 voting, dispute, withdraw (+3/-1/-3 points)
+- 24h chat cleanup + image/video uploads (500MB Plus / 80MB Free)
+- Leaderboards (clans + players, with K/D)
+- Tournaments single-elim + champion trophy
+- Hero banner ad carousel (owner-managed)
 
-### Latest launch batch (May 22, 2026)
-### Final batch v2 (May 22, 2026 — afternoon)
-- **Public Blacklist tab** in main nav (`/blacklist`) — anyone can read, only staff can mutate
-- **Clan Restore from Archive**: leader of an archived clan sees a "استعادة الكلان من الأرشفة" card on `/me`; backend `POST /api/clans/{id}/restore` + `GET /api/me/archived-clan`
-- **Transfer Clan Ownership** in Admin dashboard: `POST /api/admin/clans/{cid}/transfer/{member_id}` opens a member-pick modal in the Clan Editor
-- **Activision ID 14-day cooldown**: tracked via `act_changed_at`; locked input + Arabic countdown on profile; backend rejects with "لا يمكنك تغيير الـ Activision ID إلا مرة كل أسبوعين"
-- **Match-level Prayer Break (15-min)**: `POST /api/matches/{id}/match-prayer-break` + `/match-prayer-resume`; pauses voting and grace; live countdown in the chat header with "العودة من البريك" button for the team that started it
-- **Online clans filter for matchmaking**: `last_seen_at` updated on every authenticated request; `GET /api/online-clans` returns only clans with members active in the last 5 minutes; ChallengeModal now uses this list
-- **Activision ID required at registration** + editable from profile
-- **2h clan-leave cooldown** (leave/kick/archive)
-- **Clan challenge → request/accept/reject flow** (no auto-match)
-- **Match map timers**: 10-min Grace Period + 10-min Prayer Break + auto-claim win
-- **Admin video reject NOTE attached inline** below X icon
-- **3-hour pair cooldown** between same two clans (staff can override)
-- **Clan archive (Power button)** kicks all members + applies 2h cooldown
-- **Owner/Admin edit** username/email/password/act for users
-- **Owner/Admin edit** clan name/tag/description
-- **Forgot password** (MOCKED) — generates token; admin sees pending list with `token` field
-- **Blacklist page** (`/blacklist`, staff only) with player account snapshot + cheat tool + proof image upload
-- **Monthly League auto-rotation** — `دوري رايفلز - <month-ar>` resets points each new month + grants trophy to top clan
-- **Trophy Room** in ClanDetailPage (league + tournament trophies)
-- **Live streaming integration**:
-  - Profile fields: `twitch_url`, `kick_url`, `tiktok_url`
-  - `/api/users/{id}/live` + `/api/matches/{id}/live-streams`
-  - Twitch: real-time via Helix API (needs `TWITCH_CLIENT_ID` + `TWITCH_CLIENT_SECRET` env)
-  - Kick: public unofficial endpoint (best-effort)
-  - TikTok: link-only (no live detection)
-  - Match page right sidebar shows live thumbnails with click-through
-- **Tournament `losers_bracket` flag** (UI checkbox; double-elim logic still single-elim under the hood — flag stored for future expansion)
-- **Brand rename**: All "Arena" references → "Rivals"
+### Launch Batch v1
+- Activision ID required, 2h clan-leave cooldown, 14d ACT change cooldown
+- Clan challenge accept/reject workflow
+- 10-min Grace Period + 10-min Prayer Break per map + auto-claim
+- Admin video reject with inline note
+- 3h pair cooldown (staff override)
+- Clan archive (kick all + 2h cooldown) + restore + transfer ownership
+- Admin edit user/clan, MOCKED forgot-password
+- Public Blacklist page with proof image
+- Monthly auto-league `دوري رايفلز - <month>` rotation + Trophy Room
+- Streaming: Twitch (real API), Kick (public), TikTok (link)
+- Tournament losers_bracket flag
 
-## Architecture
-- Backend: FastAPI + Motor (MongoDB)
-- Frontend: React 19 + Tailwind + shadcn + lucide-react + sonner
-- Storage: UUID string ids, ISO timestamps, exclude _id from responses, disk for videos
-- Auth: JWT in HttpOnly cookie + Authorization Bearer fallback
-- Background: hourly chat cleanup loop + hourly league rotation loop
+### Launch Batch v2
+- Premium profile layout (banner + avatar overlap + big ACT typography + social rows)
+- Personal Plus tier with 3-day trial on register
+- Avatar/banner/accent_color upload gated behind Personal Plus
+- Dedicated `/plus` page with 2 cards (Personal 12.99 SAR / Clan 26.99 SAR)
+- Footer with Discord/Instagram/TikTok/Support links
+- Discord webhook (env `DISCORD_WEBHOOK_URL`) — new tournament + match-start embeds
+- Career stats W/L + K/D ratio (2 decimals) on users and clans
+- 6-member roster gate on challenge create/accept
+- Act required to join clan
+- 30-min user prayer-break cooldown
+- Head-to-Head widget in match room
+- Public PlayerProfilePage with same premium layout
+- Players link from anywhere → `/players/:id`
+- Clan Plus animated glow on leaderboard (`row.is_clan_plus`)
+- Registration terms checkbox + `accepted_terms` validation
 
-## Pending / Backlog
-- **P0**: Provide Twitch Client-ID + Secret to enable real Twitch live detection
-- **P1**: Resend/SendGrid API key to send actual password-reset emails (currently MOCKED)
-- **P2**: Implement true double-elimination bracket logic when losers_bracket flag is true
-- **P2**: Real WebSocket chat (current is polling)
-- **P2**: Google OAuth (placeholder toast)
-- **P2**: Paid Plus subscription (Stripe)
-- **P2**: Server-side pagination on clans/players lists
-- **P3**: Real object-storage (S3) for media instead of disk
-- **P3**: Notifications (in-app + email) for invites/match start
+### Final Batch (Feb 2026)
+- **Multi-league system**: `POST /api/leagues/custom`, `GET /api/leagues/active`, `POST /api/leagues/{id}/join`, `POST /api/leagues/{id}/finish` — multiple custom leagues run in parallel with own name/game/rules; clans pick which to queue
+- **League champion badges**: shown next to clan name on leaderboard
+- **AI Referee Bot** (welcomes both clans on match start; bilingual)
+- **Toxicity log**: every chat msg async-scanned; warnings posted + stored in `db.toxicity_log`; admin view at `/api/admin/toxicity-log`
+- **AI Vision Scoreboard OCR**: `POST /api/matches/{id}/scoreboard` reads endgame screenshot, updates each player's lifetime K/D stats
+- Mongo URL fallback to `mongodb://localhost:27017` for dev safety
 
-## Testing
-- 29/29 pytest tests passing in `/app/backend/tests/test_rivals.py`
-- Frontend smoke-test: homepage renders with hero carousel + clan rankings
+## API surface (key new endpoints)
+- POST /api/leagues/custom            (staff)
+- GET  /api/leagues/active            (public)
+- POST /api/leagues/{id}/join         (leader/vice)
+- POST /api/leagues/{id}/finish       (staff → awards badge)
+- POST /api/matches/{id}/scoreboard   (vision OCR → updates K/D)
+- GET  /api/admin/toxicity-log        (staff)
+- POST /api/admin/users/{id}/personal-plus  (owner only)
+- POST /api/admin/clans/{id}/plus     (owner only)
+- GET  /api/matches/{id}/h2h          (public)
+- POST /api/matches/{id}/match-prayer-break + /match-prayer-resume
+- POST /api/clans/{id}/restore, /archive, /admin/clans/{id}/transfer/{m}
+
+## Pending external creds (gracefully handled when missing)
+- TWITCH_CLIENT_ID + TWITCH_CLIENT_SECRET → real Twitch live detection
+- DISCORD_WEBHOOK_URL → community embeds
+- Resend/SendGrid API key → real password-reset emails
+- MongoDB Atlas user credentials (the supplied one returned bad auth — currently on local Mongo)

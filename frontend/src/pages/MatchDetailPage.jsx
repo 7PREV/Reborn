@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { Send, Image as ImageIcon, Video, Shield, Flag, Lock, LogOut } from "lucide-react";
+import { Send, Image as ImageIcon, Video, Shield, Flag, Lock, LogOut, ScanLine } from "lucide-react";
 import { toast } from "sonner";
 import MapsBoard from "../components/match/MapsBoard";
 import ChatMessage from "../components/match/ChatMessage";
@@ -94,8 +94,42 @@ function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute, onWit
   );
 }
 
+function ScoreboardOCRButton({ matchId }) {
+  const [busy, setBusy] = useState(false);
+  const onPick = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 4_000_000) {
+      toast.error("الصورة كبيرة جداً (الحد 4MB)");
+      return;
+    }
+    const fr = new FileReader();
+    fr.onload = async () => {
+      setBusy(true);
+      try {
+        const { data } = await api.post(`/matches/${matchId}/scoreboard`, { image_b64: fr.result });
+        toast.success(`✅ ${data.matched.length} لاعب — تحديث K/D`);
+      } catch (err) {
+        toast.error(formatApiErrorDetail(err.response?.data?.detail) || "فشل التعرف على الصورة");
+      } finally {
+        setBusy(false);
+      }
+    };
+    fr.readAsDataURL(f);
+  };
+  return (
+    <label
+      data-testid="scoreboard-upload"
+      className={`px-3 py-1.5 rounded-md border border-gold-500/40 text-gold-500 text-sm hover:bg-gold-500/10 flex items-center gap-1 cursor-pointer ${busy ? "opacity-60 cursor-wait" : ""}`}
+    >
+      <ScanLine size={14} /> {busy ? "جاري القراءة..." : "رفع لوحة النتائج"}
+      <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onPick} disabled={busy} className="hidden" />
+    </label>
+  );
+}
+
 function ChatComposer({ text, image, video, videoProgress, isPlus, onText, onImage, onVideo, onClearImage, onClearVideo, onSubmit }) {
-  const maxMB = isPlus ? 500 : 100;
+  const maxMB = isPlus ? 500 : 80;
   return (
     <form onSubmit={onSubmit} className="border-t b-soft p-3 space-y-2" data-testid="chat-form">
       {videoProgress > 0 && (
@@ -229,7 +263,7 @@ export default function MatchDetailPage() {
   const onVideo = async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    const maxMB = user?.is_plus ? 500 : 100;
+    const maxMB = user?.is_plus ? 500 : 80;
     if (f.size > maxMB * 1024 * 1024) {
       return toast.error(`الفيديو كبير. الحد ${maxMB}MB` + (user?.is_plus ? "" : " — ترقى لـ Plus لزيادتها لـ 500MB"));
     }
@@ -388,7 +422,10 @@ export default function MatchDetailPage() {
             <span className="text-xs text-white/40">
               {isStaffOfMatch ? "نص + وسائط" : "وسائط فقط (للزوار)"}
             </span>
-            <div className="mr-auto">
+            <div className="mr-auto flex items-center gap-2 flex-wrap">
+              {(isLeaderA || isLeaderB || isAdminFlag) && (
+                <ScoreboardOCRButton matchId={id} />
+              )}
               <MatchPrayerBreak
                 match={match}
                 userSide={isLeaderA ? "A" : isLeaderB ? "B" : null}
