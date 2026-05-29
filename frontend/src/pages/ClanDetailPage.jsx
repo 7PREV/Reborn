@@ -104,7 +104,9 @@ function LeaguesJoin({ clanId, clanLeagueIds, leagues, reload }) {
       await api.post(`/leagues/${lid}/join`);
       toast.success("تم التسجيل في الدوري");
       reload();
-    } catch (err) { handleErr(err); }
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || "تعذّر التسجيل في الدوري");
+    }
   };
   if (!leagues || leagues.length === 0) return null;
   return (
