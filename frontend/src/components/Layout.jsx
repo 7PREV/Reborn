@@ -13,6 +13,7 @@ export default function Layout({ children }) {
     { to: "/clans", label: "الكلانات", icon: Shield, id: "nav-clans" },
     { to: "/players", label: "اللاعبون", icon: Users, id: "nav-players" },
     { to: "/leaderboard", label: "النتائج", icon: Trophy, id: "nav-leaderboard" },
+    { to: "/leagues", label: "الدوريات", icon: Award, id: "nav-leagues" },
     { to: "/rules", label: "القوانين", icon: ScrollText, id: "nav-rules" },
     { to: "/plus", label: "PLUS", icon: Sparkles, id: "nav-plus" },
     { to: "/blacklist", label: "القائمة السوداء", icon: ShieldOff, id: "nav-blacklist" },
@@ -164,6 +165,7 @@ function SiteFooter() {
           <div className="text-[10px] uppercase tracking-widest text-white/40 mb-3">روابط مفيدة</div>
           <ul className="space-y-1.5 text-sm">
             <li><a href="/rules" className="text-white/70 hover:text-gold-500">القوانين</a></li>
+            <li><a href="/leagues" className="text-white/70 hover:text-gold-500">الدوريات</a></li>
             <li><a href="/plus" className="text-white/70 hover:text-gold-500">PLUS</a></li>
             <li><a href="/blacklist" className="text-white/70 hover:text-gold-500">القائمة السوداء</a></li>
           </ul>

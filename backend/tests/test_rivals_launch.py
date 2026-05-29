@@ -408,3 +408,35 @@ def test_clan_challenge_blocked_under_6_members():
 def test_career_stats_kd_in_sanitized_user():
     _, u, t = _register("kd_check")
     assert "wins" in u and "losses" in u and "kd" in u
+
+
+# ---------------- League leaderboard (decoupled standings) ----------------
+def test_league_leaderboard_endpoint_and_empty_state(admin):
+    h = {"Authorization": f"Bearer {admin['token']}"}
+    name = f"LB Test League {uuid.uuid4().hex[:6]}"
+    r = requests.post(f"{API}/leagues/custom", headers=h,
+                      json={"name": name, "game": "Call of Duty",
+                            "rules": "BO3 — points: +3 / -1 / -3",
+                            "description": "auto test league"})
+    assert r.status_code == 200, r.text
+    league = r.json()
+    assert league["status"] == "active"
+    # Leaderboard responds with empty standings for a fresh league
+    lb = requests.get(f"{API}/leagues/{league['id']}/leaderboard")
+    assert lb.status_code == 200, lb.text
+    data = lb.json()
+    assert data["league"]["id"] == league["id"]
+    assert data["standings"] == []
+
+
+def test_league_leaderboard_404_for_unknown():
+    r = requests.get(f"{API}/leagues/does-not-exist-xyz/leaderboard")
+    assert r.status_code == 404
+
+
+# ---------------- Scoreboard OCR endpoint removed ----------------
+def test_scoreboard_endpoint_removed():
+    """The OCR scoreboard endpoint has been intentionally removed."""
+    r = requests.post(f"{API}/matches/anything/scoreboard", json={"image_b64": "x"})
+    # 404 = route not registered (or 405). Either way, the feature is gone.
+    assert r.status_code in (404, 405), r.text

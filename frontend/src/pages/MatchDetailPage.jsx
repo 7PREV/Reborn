@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { Send, Image as ImageIcon, Video, Shield, Flag, Lock, LogOut, ScanLine } from "lucide-react";
+import { Send, Image as ImageIcon, Video, Shield, Flag, Lock, LogOut } from "lucide-react";
 import { toast } from "sonner";
 import MapsBoard from "../components/match/MapsBoard";
 import ChatMessage from "../components/match/ChatMessage";
@@ -91,40 +91,6 @@ function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute, onWit
         </Link>
       </div>
     </div>
-  );
-}
-
-function ScoreboardOCRButton({ matchId }) {
-  const [busy, setBusy] = useState(false);
-  const onPick = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    if (f.size > 4_000_000) {
-      toast.error("الصورة كبيرة جداً (الحد 4MB)");
-      return;
-    }
-    const fr = new FileReader();
-    fr.onload = async () => {
-      setBusy(true);
-      try {
-        const { data } = await api.post(`/matches/${matchId}/scoreboard`, { image_b64: fr.result });
-        toast.success(`✅ ${data.matched.length} لاعب — تحديث K/D`);
-      } catch (err) {
-        toast.error(formatApiErrorDetail(err.response?.data?.detail) || "فشل التعرف على الصورة");
-      } finally {
-        setBusy(false);
-      }
-    };
-    fr.readAsDataURL(f);
-  };
-  return (
-    <label
-      data-testid="scoreboard-upload"
-      className={`px-3 py-1.5 rounded-md border border-gold-500/40 text-gold-500 text-sm hover:bg-gold-500/10 flex items-center gap-1 cursor-pointer ${busy ? "opacity-60 cursor-wait" : ""}`}
-    >
-      <ScanLine size={14} /> {busy ? "جاري القراءة..." : "رفع لوحة النتائج"}
-      <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onPick} disabled={busy} className="hidden" />
-    </label>
   );
 }
 
@@ -423,9 +389,6 @@ export default function MatchDetailPage() {
               {isStaffOfMatch ? "نص + وسائط" : "وسائط فقط (للزوار)"}
             </span>
             <div className="mr-auto flex items-center gap-2 flex-wrap">
-              {(isLeaderA || isLeaderB || isAdminFlag) && (
-                <ScoreboardOCRButton matchId={id} />
-              )}
               <MatchPrayerBreak
                 match={match}
                 userSide={isLeaderA ? "A" : isLeaderB ? "B" : null}

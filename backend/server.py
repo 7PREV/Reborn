@@ -389,11 +389,6 @@ class CustomLeagueIn(BaseModel):
     rules_image: Optional[str] = ""  # base64 data URL OR external image URL
 
 
-class ScoreboardOCRIn(BaseModel):
-    image_b64: str  # data URL or raw base64 PNG/JPEG
-    league_id: Optional[str] = None  # if set, K/D updates count toward that league
-
-
 # ---------------- Startup ----------------
 async def _cleanup_old_chat_messages() -> int:
     """Delete chat messages older than 24h + their video files. Returns count deleted."""
@@ -1009,6 +1004,23 @@ PRAYER_BREAK_SECONDS = 10 * 60  # 10-minute prayer break that pauses the grace t
 MATCH_PAIR_COOLDOWN_HOURS = 3   # Same two clans cannot match within 3 hours
 
 
+async def _apply_league_standings(league_id: Optional[str], clan_id: str,
+                                  points_delta: int, win: bool = False, loss: bool = False) -> None:
+    """Upsert per-league standings for a clan. Independent of global clan.points."""
+    if not league_id:
+        return
+    inc = {"points": points_delta}
+    if win:
+        inc["wins"] = 1
+    if loss:
+        inc["losses"] = 1
+    await db.league_standings.update_one(
+        {"league_id": league_id, "clan_id": clan_id},
+        {"$inc": inc, "$set": {"updated_at": iso(now_utc())}},
+        upsert=True,
+    )
+
+
 async def _check_match_pair_cooldown(clan_a_id: str, clan_b_id: str) -> None:
     """Raises 400 if the two clans have a match (live or finished) within the cooldown window."""
     cutoff = iso(now_utc() - timedelta(hours=MATCH_PAIR_COOLDOWN_HOURS))
@@ -1068,6 +1080,11 @@ async def _maybe_finish(match: dict):
     }})
     await db.clans.update_one({"id": winner}, {"$inc": {"wins": 1, "points": POINTS_WIN}})
     await db.clans.update_one({"id": loser}, {"$inc": {"losses": 1, "points": POINTS_LOSS}})
+    # Per-league standings (decoupled)
+    league_id = match.get("league_id")
+    if league_id:
+        await _apply_league_standings(league_id, winner, POINTS_WIN, win=True)
+        await _apply_league_standings(league_id, loser, POINTS_LOSS, loss=True)
     # Career stats: increment player wins/losses for each active member of each side
     winner_clan = await db.clans.find_one({"id": winner}, {"_id": 0, "member_ids": 1})
     loser_clan = await db.clans.find_one({"id": loser}, {"_id": 0, "member_ids": 1})
@@ -1269,6 +1286,12 @@ async def _finalize_withdrawal(match_id: str, withdrawing_clan: str, winning_cla
     }})
     await db.clans.update_one({"id": winning_clan}, {"$inc": {"wins": 1, "points": POINTS_WIN}})
     await db.clans.update_one({"id": withdrawing_clan}, {"$inc": {"losses": 1, "points": POINTS_WITHDRAW}})
+    # Per-league standings (decoupled)
+    m_doc = await db.matches.find_one({"id": match_id}, {"_id": 0, "league_id": 1})
+    league_id = (m_doc or {}).get("league_id")
+    if league_id:
+        await _apply_league_standings(league_id, winning_clan, POINTS_WIN, win=True)
+        await _apply_league_standings(league_id, withdrawing_clan, POINTS_WITHDRAW, loss=True)
     # Career stats for individual players
     w_clan = await db.clans.find_one({"id": winning_clan}, {"_id": 0, "member_ids": 1})
     l_clan = await db.clans.find_one({"id": withdrawing_clan}, {"_id": 0, "member_ids": 1})
@@ -2993,6 +3016,56 @@ async def join_league(league_id: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
+@api.get("/leagues/{league_id}/leaderboard")
+async def league_leaderboard(league_id: str):
+    """Per-league standings: each league tracks its own independent points/wins/losses.
+    Returns clans sorted by points desc, then wins desc."""
+    league = await db.leagues.find_one({"id": league_id}, {"_id": 0})
+    if not league:
+        raise HTTPException(404, "الدوري غير موجود")
+    rows = await db.league_standings.find(
+        {"league_id": league_id}, {"_id": 0}
+    ).sort([("points", -1), ("wins", -1)]).to_list(200)
+    # Also include clans that joined but haven't played yet (0 points), for visibility
+    joined_clans = await db.clans.find(
+        {"league_ids": league_id, "archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1, "tag": 1, "is_plus": 1, "plus_until": 1},
+    ).to_list(200)
+    enriched = []
+    seen = set()
+    for r in rows:
+        clan = next((c for c in joined_clans if c["id"] == r["clan_id"]), None)
+        if not clan:
+            clan = await db.clans.find_one(
+                {"id": r["clan_id"]},
+                {"_id": 0, "id": 1, "name": 1, "tag": 1, "is_plus": 1, "plus_until": 1},
+            )
+        if not clan:
+            continue
+        seen.add(clan["id"])
+        enriched.append({
+            "clan_id": clan["id"],
+            "clan_name": clan["name"],
+            "clan_tag": clan["tag"],
+            "is_plus": bool(clan.get("is_plus")),
+            "points": r.get("points", 0),
+            "wins": r.get("wins", 0),
+            "losses": r.get("losses", 0),
+        })
+    for c in joined_clans:
+        if c["id"] in seen:
+            continue
+        enriched.append({
+            "clan_id": c["id"],
+            "clan_name": c["name"],
+            "clan_tag": c["tag"],
+            "is_plus": bool(c.get("is_plus")),
+            "points": 0, "wins": 0, "losses": 0,
+        })
+    enriched.sort(key=lambda x: (-x["points"], -x["wins"]))
+    return {"league": league, "standings": enriched}
+
+
 @api.post("/leagues/{league_id}/finish")
 async def finish_custom_league(league_id: str, user: dict = Depends(get_current_user)):
     """Owner/Admin closes a custom league and awards the badge to the top-points
@@ -3004,10 +3077,21 @@ async def finish_custom_league(league_id: str, user: dict = Depends(get_current_
         raise HTTPException(404, "غير موجود")
     if league.get("status") != "active":
         raise HTTPException(400, "الدوري ليس نشطاً")
-    top = await db.clans.find_one(
-        {"league_ids": league_id, "archived": {"$ne": True}},
-        {"_id": 0}, sort=[("points", -1)],
+    top_row = await db.league_standings.find_one(
+        {"league_id": league_id}, {"_id": 0},
+        sort=[("points", -1), ("wins", -1)],
     )
+    top = None
+    if top_row:
+        top = await db.clans.find_one(
+            {"id": top_row["clan_id"], "archived": {"$ne": True}}, {"_id": 0}
+        )
+    if not top:
+        # Fallback: any joined clan with the most global points
+        top = await db.clans.find_one(
+            {"league_ids": league_id, "archived": {"$ne": True}},
+            {"_id": 0}, sort=[("points", -1)],
+        )
     update = {"status": "finished", "finished_at": iso(now_utc())}
     if top:
         update["champion_clan_id"] = top["id"]
@@ -3171,90 +3255,6 @@ async def admin_toxicity_log(user: dict = Depends(get_current_user)):
         raise HTTPException(403, "للمنظمين فقط")
     docs = await db.toxicity_log.find({}, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
     return docs
-
-
-@api.post("/matches/{match_id}/scoreboard")
-async def scoreboard_ocr(match_id: str, body: ScoreboardOCRIn, user: dict = Depends(get_current_user)):
-    """AI-Vision OCR for a Call of Duty endgame scoreboard. Updates each detected
-    player's permanent K/D stats. Returns the parsed rows + a chat-bot summary."""
-    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
-    if not match:
-        raise HTTPException(404, "غير موجود")
-    a = await _get_clan(match["clan_a_id"])
-    b = await _get_clan(match["clan_b_id"])
-    side = _user_side(user, a, b)
-    if not side and not is_staff(user):
-        raise HTTPException(403, "فقط القائد/النائب أو المنظم")
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(503, "خدمة الذكاء الاصطناعي غير مفعلة")
-    raw = await _ai_chat(
-        system_prompt=(
-            "You receive a Call of Duty endgame scoreboard screenshot. "
-            "Extract every visible player row. "
-            'Reply with ONLY a JSON object: {"rows":[{"username":"...","kills":N,"deaths":N}]}. '
-            "No prose, no markdown, no explanation. Skip rows you cannot read confidently."
-        ),
-        user_text="Extract the scoreboard rows as JSON.",
-        session_id=f"ocr-{match_id}-{uuid.uuid4().hex[:6]}",
-        image_b64=body.image_b64,
-        max_chars=400,
-    )
-    if not raw:
-        raise HTTPException(502, "فشل التعرف على الصورة")
-    import json
-    rows = []
-    try:
-        snippet = raw.strip()
-        if snippet.startswith("```"):
-            snippet = snippet.strip("`").split("\n", 1)[-1]
-        if snippet.endswith("```"):
-            snippet = snippet.rsplit("```", 1)[0]
-        i = snippet.find("{")
-        j = snippet.rfind("}")
-        if i >= 0 and j >= 0:
-            snippet = snippet[i:j+1]
-        data = json.loads(snippet)
-        for r in (data.get("rows") or []):
-            uname = str(r.get("username", "")).strip()
-            try:
-                k = int(r.get("kills", 0))
-                d = int(r.get("deaths", 0))
-            except Exception:
-                continue
-            if uname and 0 <= k < 200 and 0 <= d < 200:
-                rows.append({"username": uname, "kills": k, "deaths": d})
-    except Exception as exc:
-        logger.warning(f"OCR parse error: {exc}; raw={raw[:200]}")
-        raise HTTPException(502, "تعذّر قراءة لوحة النتائج")
-    # Map detected usernames to users by case-insensitive `act` or `username`.
-    matched, unmatched = [], []
-    for r in rows:
-        u = await db.users.find_one(
-            {"$or": [
-                {"act": {"$regex": f"^{r['username']}$", "$options": "i"}},
-                {"username": {"$regex": f"^{r['username']}$", "$options": "i"}},
-            ]},
-            {"_id": 0, "id": 1, "username": 1, "act": 1, "wins": 1, "losses": 1, "kd_stats": 1},
-        )
-        if u:
-            await db.users.update_one(
-                {"id": u["id"]},
-                {"$inc": {
-                    "kd_stats.kills": r["kills"],
-                    "kd_stats.deaths": r["deaths"],
-                    "kd_stats.games": 1,
-                }},
-            )
-            matched.append({**r, "user_id": u["id"]})
-        else:
-            unmatched.append(r)
-    summary_lines = [f"🎯 تم تحديث K/D من لوحة النتائج. {len(matched)} لاعب تم رصدهم"]
-    for m in matched[:8]:
-        summary_lines.append(f"• {m['username']}: {m['kills']}/{m['deaths']}")
-    if unmatched:
-        summary_lines.append(f"({len(unmatched)} اسم لم نتطابق معه)")
-    await _post_system_chat(match_id, "\n".join(summary_lines))
-    return {"ok": True, "rows": rows, "matched": matched, "unmatched": unmatched}
 
 
 app.include_router(api)
