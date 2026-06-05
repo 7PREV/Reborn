@@ -386,7 +386,8 @@ class CustomLeagueIn(BaseModel):
     game: str = Field(default="Call of Duty", min_length=2, max_length=40)
     rules: Optional[str] = ""
     description: Optional[str] = ""
-    rules_image: Optional[str] = ""  # base64 data URL OR external image URL
+    rules_image: Optional[str] = ""  # primary banner image (data URL or http)
+    rules_images: Optional[List[str]] = None  # gallery of additional images (data URL or http)
 
 
 # ---------------- Startup ----------------
@@ -1640,7 +1641,7 @@ async def admin_chat_decision(msg_id: str, body: AdminMediaDecisionIn, user: dic
     return {"ok": True}
 
 
-# ---------------- LEADERBOARD ----------------
+# ---------------- LEADERBOARD HELPERS (used by per-league standings + clan badges) ----------------
 def _clan_is_plus(c: dict) -> bool:
     if c.get("is_plus"):
         return True
@@ -1664,32 +1665,6 @@ def _clan_badges(c: dict) -> list:
             "awarded_at": t.get("awarded_at"),
         })
     return out
-
-
-@api.get("/leaderboard/clans")
-async def leaderboard_clans(league_id: Optional[str] = None):
-    """Leaderboard clans. When `league_id` is given, restrict to clans currently
-    participating in that custom league."""
-    query = {"archived": {"$ne": True}}
-    if league_id:
-        query["league_ids"] = league_id
-    docs = await db.clans.find(
-        query,
-        {"_id": 0, "id": 1, "name": 1, "tag": 1, "points": 1, "wins": 1, "losses": 1,
-         "trophies": 1, "is_plus": 1, "plus_until": 1, "league_ids": 1}
-    ).sort("points", -1).limit(50).to_list(50)
-    for c in docs:
-        c["is_clan_plus"] = _clan_is_plus(c)
-        c["badges"] = _clan_badges(c)
-        wins, losses = c.get("wins", 0), c.get("losses", 0)
-        c["kd"] = compute_kd(wins, losses)
-    return docs
-
-
-@api.get("/leaderboard/players")
-async def leaderboard_players():
-    docs = await db.users.find({"role": {"$ne": "admin"}}, {"_id": 0}).sort("points", -1).limit(50).to_list(50)
-    return [sanitize_user(d) for d in docs]
 
 
 # ---------------- DISCORD WEBHOOK (community notifications) ----------------
@@ -2930,19 +2905,39 @@ async def _league_rotation_loop() -> None:
 
 
 # ---------------- CUSTOM LEAGUES (multi-league system) ----------------
+def _validate_rules_image(img: str, label: str = "صورة القوانين") -> str:
+    img = (img or "").strip()
+    if not img:
+        return ""
+    if img.startswith("data:image/"):
+        if len(img) > 4_500_000:  # ~3MB binary
+            raise HTTPException(400, f"{label} كبيرة جداً (الحد 3MB)")
+    elif not img.startswith("http"):
+        raise HTTPException(400, f"{label} يجب أن تكون رابطاً أو ملف صورة")
+    return img
+
+
+def _validate_rules_images_list(imgs: Optional[List[str]]) -> List[str]:
+    out: List[str] = []
+    if not imgs:
+        return out
+    if len(imgs) > 8:
+        raise HTTPException(400, "الحد الأقصى 8 صور لقوانين الدوري")
+    for img in imgs:
+        v = _validate_rules_image(img, "إحدى صور القوانين")
+        if v:
+            out.append(v)
+    return out
+
+
 @api.post("/leagues/custom")
 async def create_custom_league(body: CustomLeagueIn, user: dict = Depends(get_current_user)):
     """Owner/Admin creates a custom league with its own name, game, rules and rule image.
     Multiple custom leagues can run simultaneously."""
     if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
-    rules_image = (body.rules_image or "").strip()
-    if rules_image:
-        if rules_image.startswith("data:image/"):
-            if len(rules_image) > 4_500_000:  # ~3MB binary
-                raise HTTPException(400, "صورة القوانين كبيرة جداً (الحد 3MB)")
-        elif not rules_image.startswith("http"):
-            raise HTTPException(400, "صورة القوانين يجب أن تكون رابطاً أو ملف صورة")
+    rules_image = _validate_rules_image(body.rules_image or "")
+    rules_images = _validate_rules_images_list(body.rules_images)
     doc = {
         "id": str(uuid.uuid4()),
         "key": f"custom-{uuid.uuid4().hex[:8]}",
@@ -2950,6 +2945,7 @@ async def create_custom_league(body: CustomLeagueIn, user: dict = Depends(get_cu
         "game": body.game,
         "rules": body.rules or "",
         "rules_image": rules_image,
+        "rules_images": rules_images,
         "description": body.description or "",
         "is_custom": True,
         "status": "active",
@@ -2977,9 +2973,8 @@ async def update_custom_league(league_id: str, body: CustomLeagueIn, user: dict 
     existing = await db.leagues.find_one({"id": league_id})
     if not existing:
         raise HTTPException(404, "الدوري غير موجود")
-    rules_image = (body.rules_image or "").strip()
-    if rules_image and not rules_image.startswith(("data:image/", "http")):
-        raise HTTPException(400, "صورة القوانين يجب أن تكون رابطاً أو ملف صورة")
+    rules_image = _validate_rules_image(body.rules_image or "")
+    rules_images = _validate_rules_images_list(body.rules_images)
     await db.leagues.update_one(
         {"id": league_id},
         {"$set": {
@@ -2987,6 +2982,7 @@ async def update_custom_league(league_id: str, body: CustomLeagueIn, user: dict 
             "game": body.game,
             "rules": body.rules or "",
             "rules_image": rules_image,
+            "rules_images": rules_images,
             "description": body.description or "",
         }},
     )
