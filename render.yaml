@@ -1,0 +1,60 @@
+services:
+  - type: web
+    name: rivals-backend
+    env: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DB_NAME
+        value: rivals
+      - key: MONGO_URI
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DISCORD_GUILD_ID
+        sync: false
+      - key: DISCORD_BRIDGE_SECRET
+        generateValue: true
+
+  - type: worker
+    name: rivals-discord-bot
+    env: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python discord_bot/bot.py
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DB_NAME
+        value: rivals
+      - key: MONGO_URI
+        sync: false
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: DISCORD_GUILD_ID
+        sync: false
+      - key: DISCORD_SUPPORT_ROLE_ID
+        sync: false
+      - key: DISCORD_WELCOME_CHANNEL_ID
+        sync: false
+      - key: DISCORD_TICKET_CATEGORY_ID
+        sync: false
+      - key: DISCORD_PLUS_ROLE_ID
+        sync: false
+      - key: DISCORD_NEWS_CHANNEL_ID
+        sync: false
+      - key: DISCORD_RANK_CHANNEL_ID
+        value: "1472192794192777330"
+      - key: DISCORD_LEVEL_ROLE_MAP
+        sync: false
+      - key: DISCORD_JOB_POLL_SECONDS
+        value: "2"
+      - key: DISCORD_XP_COOLDOWN_SECONDS
+        value: "60"

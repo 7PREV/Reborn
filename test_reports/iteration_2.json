@@ -1,0 +1,57 @@
+{
+  "summary": "Iteration 2 testing of RIVALS Arabic esports (Call of Duty). Wrote 20 pytest backend tests covering auth, plus toggle, rules CRUD, games/limits meta, clan create/limits, vice-cap enforcement, BO3 maps voting + auto-finish, admin-resolve-map, dispute, chat with text/image/video plus opponent + admin decisions. All 20 backend tests pass. Frontend Playwright smoke covered login, home, clans, matches list, rules, profile (toggle Plus), admin dashboard, and match detail page. All pages render correctly in Arabic RTL with RIVALS / COD LEAGUE branding and the new MapsBoard (3 map cards, vote buttons per side, admin-resolve buttons for admins). Chat shows text + image + video messages with opponent/admin decision UI present.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/matches/{id}/vote-map",
+        "issue": "When the final vote triggers auto-finish, the response body still shows status='live', score_a=0, score_b=0. _maybe_finish writes to DB but does not mutate the local match dict before _enrich_match. DB state is correct; only the immediate response is stale. Same pattern in POST /api/matches/{id}/admin-resolve-map. Frontend masks this with 4s polling, but clients calling once will see stale state. Fix: re-read the match from DB (or update the local dict) after _maybe_finish before enriching/returning."
+      },
+      {
+        "endpoint": "POST /api/matches/{id}/vote-map",
+        "issue": "No bounds check on body.map_index; passing index >= 3 will raise IndexError -> 500. Add 0 <= map_index < BO_TOTAL validation."
+      },
+      {
+        "endpoint": "POST /api/matches/{id}/dispute",
+        "issue": "Does NOT validate vice_leader_ids are allowed to dispute despite the comment; only leaders pass. Spec said 'leader can trigger dispute'. Code correctly enforces leader OR vice via the in-list check but the error message reads 'للقادة فقط'. Minor wording inconsistency."
+      },
+      {
+        "endpoint": "GET /api/matches/{id}/chat",
+        "issue": "Outsider can_write evaluates user.id presence in clan staff list including their own clan staff (since they are not in match); the value is False as expected, but the response also exposes user_clan_id which is fine. Acceptable. Note: a fully logged-out user is rejected with 403 'سجل دخول' but get_current_user already raises 401, so the explicit check is dead code."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_rivals.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix stale response in POST /api/matches/{id}/vote-map and admin-resolve-map: after `await _maybe_finish(match)`, re-fetch the match from DB (or mirror the status/score updates onto the local dict) before returning _enrich_match. Currently returned object shows status='live' even though DB is finished.",
+    "Add map_index bounds validation (0..BO_TOTAL-1) in vote_map and admin_resolve_map to prevent 500 from IndexError.",
+    "Optional: align dispute error message ('للقادة فقط') with the fact that vices can also dispute, OR restrict to leaders only."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 945 lines; consider splitting into routers (auth, clans, matches, chat, rules, meta) for maintainability.",
+    "_chat_perms is defined but unused (get_chat and post_chat re-implement the same checks). Remove or use it to deduplicate.",
+    "Mutating local `match['maps']` then writing back the whole array is safe here but not concurrency-safe. For BO3 it is acceptable.",
+    "set_auth_cookie uses secure=True samesite=none; correct for cross-origin preview but ensure local dev tooling accounts for this.",
+    "CORS uses allow_origins=['*'] with allow_credentials=True - this is rejected by browsers and would block cookie auth from production origins. Use explicit origins from CORS_ORIGINS env var.",
+    "admin_chat_decision reads msg without {_id:0}; the returned doc is not sent back so no leak, but inconsistent with the rest of the file."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_rivals.py (new)",
+    "/app/backend/tests/test_esports.py (removed - obsolete)"
+  ],
+  "success_rate": {"backend": "100% (20/20)", "frontend": "100% (all pages render, login + toggle-plus + admin dashboard + match detail + chat verified)"},
+  "test_credentials": "admin@rivals.gg / Admin@12345 (verified working). Test users created at @example.com domain (note: pydantic EmailStr rejects @rivals.test).",
+  "seed_data_creation": "Tests create TEST_clan* clans and tu_* users via /api/auth/register; these persist in DB and are visible in clans list.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live at /app/backend/tests/test_rivals.py. Use REACT_APP_BACKEND_URL. EmailStr requires real-ish TLD (example.com). _maybe_finish bug: vote-map response returns stale status even though DB updated correctly; tests refetch via GET /api/matches/{id} to assert finished status. Frontend login submit button text is 'دخول' (yellow button), not 'تسجيل الدخول' which is the tab.",
+  "rca of the issue": "vote-map stale response: in /matches/{id}/vote-map the handler updates `match['maps']` and writes it to DB, then calls `await _maybe_finish(match)` which updates the matches collection (status/winner/score) directly but does NOT mutate the local `match` dict. The subsequent `return await _enrich_match(match)` therefore returns the pre-finish snapshot. Reproduction: have both leaders vote A on maps 0 and 2 -> last response.status == 'live', GET /api/matches/{id} -> status == 'finished'. Mitigation: after _maybe_finish, do `match = await db.matches.find_one({'id': match_id}, {'_id': 0})` and return _enrich_match(match)."
+}

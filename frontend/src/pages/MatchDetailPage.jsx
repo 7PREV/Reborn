@@ -1,0 +1,503 @@
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useParams, Link } from "react-router-dom";
+import api, { formatApiErrorDetail } from "../api";
+import { useAuth } from "../AuthContext";
+import { Send, Image as ImageIcon, Video, Shield, Flag, Lock, LogOut } from "lucide-react";
+import { toast } from "sonner";
+import MapsBoard from "../components/match/MapsBoard";
+import ChatMessage from "../components/match/ChatMessage";
+import LiveStreamsPanel from "../components/match/LiveStreamsPanel";
+import MatchPrayerBreak from "../components/match/MatchPrayerBreak";
+import H2HWidget from "../components/match/H2HWidget";
+
+const IMG_MAX = 3_000_000;
+const POLL_MS = 4000;
+
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+async function uploadVideo(file, onProgress) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post("/upload/video", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    onUploadProgress: (e) => {
+      if (e.total && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    },
+    timeout: 0,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+  return data.url;
+}
+
+function MatchHeader({ match, wonA, wonB, isLeaderA, isLeaderB, onDispute, onWithdraw }) {
+  return (
+    <div className="bg-surface border b-soft rounded-xl p-6 md:p-8">
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          {match.status === "live" ? (
+            <>
+              <span className="live-dot" />
+              <span className="text-xs uppercase tracking-widest text-destructive font-bold px-2 py-0.5 rounded-full border border-royalGold-500/30 shadow-[0_0_10px_rgba(203,213,225,0.18)] bg-royalGold-500/10">مباشر</span>
+            </>
+          ) : (
+            <span className="text-xs uppercase tracking-widest text-white/40">
+              {match.withdrawn_clan_id ? "انسحاب" : "منتهية"}
+            </span>
+          )}
+          <span className="text-xs text-white/40 mr-3">| {match.game} • BO3</span>
+        </div>
+        {match.status === "live" && (isLeaderA || isLeaderB) && (
+          <div className="flex gap-2 flex-wrap">
+            <button data-testid="withdraw-btn" onClick={onWithdraw} className="px-3 py-1.5 rounded-md border border-destructive/40 text-destructive text-sm hover:bg-destructive/10 flex items-center gap-1">
+              <LogOut size={14} /> انسحاب (-3 نقاط)
+            </button>
+            <button data-testid="dispute-btn" onClick={onDispute} className="px-3 py-1.5 rounded-md border border-destructive/40 text-destructive text-sm hover:bg-destructive/10 flex items-center gap-1">
+              <Flag size={14} /> نزاع
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-4 md:gap-8">
+        <Link to={`/clans/${match.clan_a?.id}`} className="text-right group">
+          <div className="text-xs text-gold-500 uppercase tracking-widest">[{match.clan_a?.tag}]</div>
+          <div className="font-display font-black text-2xl md:text-4xl group-hover:text-gold-500 transition">{match.clan_a?.name}</div>
+          {match.withdrawn_clan_id === match.clan_a?.id && (
+            <div className="text-[10px] uppercase tracking-widest text-destructive mt-1">منسحب</div>
+          )}
+        </Link>
+        <div className="text-center">
+          <div className="font-display font-black text-4xl md:text-6xl">
+            <span className={match.winner_clan_id === match.clan_a_id ? "text-gold-500" : ""}>{wonA}</span>
+            <span className="text-white/30 mx-3">-</span>
+            <span className={match.winner_clan_id === match.clan_b_id ? "text-gold-500" : ""}>{wonB}</span>
+          </div>
+          <div className="text-[10px] uppercase tracking-widest text-white/40 mt-1">أفضل من 3</div>
+        </div>
+        <Link to={`/clans/${match.clan_b?.id}`} className="text-left group">
+          <div className="text-xs text-gold-500 uppercase tracking-widest">[{match.clan_b?.tag}]</div>
+          <div className="font-display font-black text-2xl md:text-4xl group-hover:text-gold-500 transition">{match.clan_b?.name}</div>
+          {match.withdrawn_clan_id === match.clan_b?.id && (
+            <div className="text-[10px] uppercase tracking-widest text-destructive mt-1">منسحب</div>
+          )}
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+function ChatComposer({ text, image, video, videoProgress, isPlus, onText, onImage, onVideo, onClearImage, onClearVideo, onSubmit }) {
+  const maxMB = isPlus ? 500 : 80;
+  return (
+    <form onSubmit={onSubmit} className="border-t b-soft p-3 space-y-2" data-testid="chat-form">
+      {videoProgress > 0 && (
+        <div className="bg-background border b-soft rounded-md p-2">
+          <div className="flex items-center justify-between text-xs text-white/60 mb-1">
+            <span>جارٍ رفع الفيديو...</span>
+            <span>{videoProgress}%</span>
+          </div>
+          <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+            <div className="h-full bg-gold-500 transition-all" style={{ width: `${videoProgress}%` }} />
+          </div>
+        </div>
+      )}
+      {(image || video) && (
+        <div className="flex gap-2">
+          {image && (
+            <div className="relative">
+              <img src={image} alt="" className="h-16 w-16 rounded object-cover border b-soft" />
+              <button type="button" onClick={onClearImage} className="absolute -top-1 -right-1 bg-destructive rounded-full text-white text-xs w-4 h-4 grid place-items-center">×</button>
+            </div>
+          )}
+          {video && (
+            <div className="relative">
+              <div className="h-16 w-16 rounded border b-soft bg-background grid place-items-center text-gold-500">
+                <Video size={20} />
+              </div>
+              <button type="button" onClick={onClearVideo} className="absolute -top-1 -right-1 bg-destructive rounded-full text-white text-xs w-4 h-4 grid place-items-center">×</button>
+              <div className="text-[10px] text-white/40 mt-1 max-w-[64px] truncate">{video.name}</div>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="flex gap-2 items-end">
+        <label className="cursor-pointer p-2 rounded-md hover:bg-white/5 text-white/60" title="صورة">
+          <ImageIcon size={20} />
+          <input data-testid="chat-image-input" type="file" accept="image/*" onChange={onImage} className="hidden" />
+        </label>
+        <label className="cursor-pointer p-2 rounded-md hover:bg-white/5 text-white/60" title={`فيديو (${maxMB}MB كحد أقصى)`}>
+          <Video size={20} />
+          <input data-testid="chat-video-input" type="file" accept="video/*" onChange={onVideo} className="hidden" disabled={videoProgress > 0} />
+        </label>
+        <input
+          data-testid="chat-input"
+          value={text}
+          onChange={(e) => onText(e.target.value)}
+          placeholder="اكتب رسالة..."
+          className="flex-1 bg-background border b-soft rounded-md px-4 py-2 outline-none focus:border-gold-500/40"
+        />
+        <button data-testid="send-chat" type="submit" disabled={videoProgress > 0} className="px-4 py-2 rounded-md bg-gold-500 text-black hover:bg-gold-400 transition disabled:opacity-50">
+          <Send size={16} />
+        </button>
+      </div>
+      <div className="text-[10px] text-white/40 text-center">
+        حد الفيديو: {maxMB}MB {!isPlus && "— ترقى لـ Plus لـ 500MB"}
+      </div>
+    </form>
+  );
+}
+
+function MvpVoteModal({ status, onVote }) {
+  if (!status?.can_vote) return null;
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" data-testid="mvp-vote-modal">
+      <div className="w-full max-w-md rounded-xl border b-soft bg-surface p-5">
+        <h3 className="font-display font-black text-xl text-gold-500">Rivals MVP</h3>
+        <p className="text-sm text-white/60 mt-1">اختر نجم المباراة من زملائك المحضرين (لا يمكنك التصويت لنفسك).</p>
+        <div className="mt-4 space-y-2">
+          {(status.eligible_teammates || []).map((p) => (
+            <button
+              key={p.id}
+              onClick={() => onVote(p.id)}
+              className="w-full text-right rounded-md border b-soft px-3 py-2 hover:border-gold-500/40 hover:bg-white/5"
+            >
+              <div className="font-bold">{p.username}</div>
+              <div className="text-xs text-white/45">{p.act || "—"}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function MatchDetailPage() {
+  const { id } = useParams();
+  const { user } = useAuth();
+  const isManagementUser = user?.role === "owner" || user?.role === "admin";
+  const [match, setMatch] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [canWrite, setCanWrite] = useState(false);
+  const [isAdminFlag, setIsAdminFlag] = useState(false);
+  const [userClanInChat, setUserClanInChat] = useState(null);
+  const [text, setText] = useState("");
+  const [image, setImage] = useState(null);
+  const [video, setVideo] = useState(null);     // {url, name, size}
+  const [videoProgress, setVideoProgress] = useState(0);
+  const [mvpStatus, setMvpStatus] = useState(null);
+  const scrollRef = useRef(null);
+
+  const loadMatch = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/matches/${id}`);
+      setMatch(data);
+    } catch {
+      // polling will retry
+    }
+  }, [id]);
+
+  const loadChat = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/matches/${id}/chat`);
+      setMessages(data.messages);
+      setCanWrite(data.can_write);
+      setIsAdminFlag(Boolean(data.is_admin || isManagementUser));
+      setUserClanInChat(data.user_clan_id);
+    } catch {
+      // 401/403 expected for guests / outsiders; polling retries
+      setIsAdminFlag(Boolean(isManagementUser));
+    }
+  }, [id, isManagementUser]);
+
+  const loadMvpStatus = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/matches/${id}/mvp-status`);
+      setMvpStatus(data);
+    } catch {
+      setMvpStatus(null);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    loadMatch();
+    loadChat();
+    const t = setInterval(() => { loadChat(); loadMatch(); }, POLL_MS);
+    return () => clearInterval(t);
+  }, [loadMatch, loadChat]);
+
+  useEffect(() => {
+    if (match?.status === "finished" && user) {
+      loadMvpStatus();
+    }
+  }, [match?.status, user, loadMvpStatus]);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages.length]);
+
+  const matchClans = useMemo(
+    () => ({ a: match?.clan_a?.id, b: match?.clan_b?.id }),
+    [match?.clan_a?.id, match?.clan_b?.id]
+  );
+
+  const wonA = useMemo(
+    () => (match?.maps?.filter((m) => m.winner === "A").length ?? 0),
+    [match?.maps]
+  );
+  const wonB = useMemo(
+    () => (match?.maps?.filter((m) => m.winner === "B").length ?? 0),
+    [match?.maps]
+  );
+
+  if (!match) return <div className="text-white/40">جارٍ التحميل...</div>;
+
+  const isLeaderA = !!(user && match.clan_a && user.clan_id === match.clan_a.id);
+  const isLeaderB = !!(user && match.clan_b && user.clan_id === match.clan_b.id);
+
+  const onImage = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > IMG_MAX) return toast.error("الصورة كبيرة (الحد 3MB)");
+    setImage(await readAsDataURL(f));
+  };
+  const onVideo = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const maxMB = user?.is_plus ? 500 : 80;
+    if (f.size > maxMB * 1024 * 1024) {
+      return toast.error(`الفيديو كبير. الحد ${maxMB}MB` + (user?.is_plus ? "" : " — ترقى لـ Plus لزيادتها لـ 500MB"));
+    }
+    setVideoProgress(1);
+    try {
+      const url = await uploadVideo(f, setVideoProgress);
+      setVideo({ url, name: f.name, size: f.size });
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || "فشل رفع الفيديو");
+    } finally {
+      setVideoProgress(0);
+    }
+  };
+
+  const handleErr = (err) => toast.error(formatApiErrorDetail(err.response?.data?.detail));
+
+  const send = async (e) => {
+    e.preventDefault();
+    if (!text.trim() && !image && !video) return;
+    try {
+      await api.post(`/matches/${id}/chat`, {
+        text: text.trim(),
+        image,
+        video: video?.url || null,
+      });
+      setText(""); setImage(null); setVideo(null);
+      loadChat();
+    } catch (err) { handleErr(err); }
+  };
+
+  const vote = async (idx, winnerClanId) => {
+    try {
+      await api.post(`/matches/${id}/vote-map`, { map_index: idx, winner_clan_id: winnerClanId });
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
+  const resolve = async (idx, winnerClanId) => {
+    try {
+      await api.post(`/matches/${id}/admin-resolve-map`, { map_index: idx, winner_clan_id: winnerClanId });
+      toast.success("تم تحديد الفائز");
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
+  const dispute = async () => {
+    try {
+      await api.post(`/matches/${id}/dispute`);
+      toast.success("تم استدعاء المنظم");
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
+  const startGrace = async (idx) => {
+    try {
+      await api.post(`/matches/${id}/maps/${idx}/grace`);
+      toast.success("بدأت مهلة 10 دقائق");
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
+  const startPrayer = async (idx) => {
+    try {
+      await api.post(`/matches/${id}/maps/${idx}/prayer`);
+      toast.success("استراحة صلاة بدأت — المهلة موقوفة");
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
+  const claimGraceWin = async (idx) => {
+    try {
+      await api.post(`/matches/${id}/maps/${idx}/claim-grace-win`);
+      toast.success("تم احتساب الفوز بالماب");
+      loadMatch();
+    } catch (err) { handleErr(err); }
+  };
+
+  const withdraw = async () => {
+    // eslint-disable-next-line no-alert
+    if (!confirm("هل أنت متأكد؟ سيتم خصم 3 نقاط من كلانك وفوز الخصم.")) return;
+    try {
+      await api.post(`/matches/${id}/withdraw`);
+      toast.success("تم الانسحاب من المباراة");
+      loadMatch();
+      loadChat();
+    } catch (err) { handleErr(err); }
+  };
+
+  const opponentDecide = async (msgId, decision) => {
+    try {
+      await api.post(`/chat/${msgId}/opponent-decision`, { decision });
+      toast.success(decision === "accept" ? "تم التأكيد" : "تم الرفض، سيتدخل المنظم");
+      loadChat();
+    } catch (err) { handleErr(err); }
+  };
+
+  const adminDecide = async (msgId, decision) => {
+    let note = "";
+    let finalDecision = decision;
+    if (decision === "reject") {
+      // eslint-disable-next-line no-alert
+      note = prompt("سبب الرفض (سيظهر تحت الفيديو):") || "";
+      if (!note.trim()) {
+        toast.error("يجب كتابة سبب الرفض");
+        return;
+      }
+    } else if (decision === "note") {
+      // eslint-disable-next-line no-alert
+      note = prompt("اكتب ملاحظتك:") || "";
+      if (!note) return;
+      finalDecision = "approve";
+    }
+    try {
+      await api.post(`/chat/${msgId}/admin-decision`, { decision: finalDecision, note });
+      loadChat();
+    } catch (err) { handleErr(err); }
+  };
+
+  const voteMvp = async (playerId) => {
+    try {
+      const { data } = await api.post(`/matches/${id}/mvp-vote`, { player_id: playerId });
+      if (data?.winner_user_id) {
+        toast.success("تم إغلاق التصويت وتحديد نجم المباراة");
+      } else {
+        toast.success("تم تسجيل صوتك");
+      }
+      loadMvpStatus();
+    } catch (err) { handleErr(err); }
+  };
+
+  const isStaffOfMatch = isAdminFlag || isLeaderA || isLeaderB;
+
+  return (
+    <div className="space-y-6">
+      <MatchHeader
+        match={match} wonA={wonA} wonB={wonB}
+        isLeaderA={isLeaderA} isLeaderB={isLeaderB}
+        onDispute={dispute} onWithdraw={withdraw}
+      />
+      <MvpVoteModal status={mvpStatus} onVote={voteMvp} />
+      <div className="bg-surface border b-soft rounded-xl p-6 md:p-8 -mt-6">
+        <MapsBoard
+          match={match}
+          isLeaderA={isLeaderA}
+          isLeaderB={isLeaderB}
+          isAdmin={isAdminFlag}
+          userSide={isLeaderA ? "A" : isLeaderB ? "B" : null}
+          onVote={vote}
+          onResolve={resolve}
+          onGrace={startGrace}
+          onPrayer={startPrayer}
+          onClaim={claimGraceWin}
+        />
+        {match.status === "finished" && match.winner_clan_id && (
+          <div className="mt-6 text-center py-3 bg-gold-500/10 border border-gold-500/30 rounded-lg">
+            <div className="text-[10px] uppercase tracking-widest text-gold-500">الفائز</div>
+            <div className="font-display font-black text-2xl text-gold-500">
+              {match.winner_clan_id === match.clan_a?.id ? match.clan_a?.name : match.clan_b?.name}
+            </div>
+          </div>
+        )}
+        {!!mvpStatus?.winner && (
+          <div className="mt-3 text-center py-2 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm">
+            نجم المباراة: {mvpStatus.winner.username}
+          </div>
+        )}
+      </div>
+
+      <div className="grid lg:grid-cols-[1fr_300px] gap-6">
+        <div className="bg-surface border b-soft rounded-xl overflow-hidden">
+          <div className="p-4 border-b b-soft flex items-center gap-2 flex-wrap">
+            <Shield size={18} className="text-gold-500" />
+            <h2 className="font-display font-black text-lg">شات المباراة</h2>
+            <span className="text-xs text-white/40">
+              {isStaffOfMatch ? "نص + وسائط" : "وسائط فقط (للزوار)"}
+            </span>
+            <div className="mr-auto flex items-center gap-2 flex-wrap">
+              <MatchPrayerBreak
+                match={match}
+                userSide={isLeaderA ? "A" : isLeaderB ? "B" : null}
+                isStaff={isAdminFlag}
+                onUpdate={() => { loadMatch(); loadChat(); }}
+              />
+            </div>
+          </div>
+
+          <div ref={scrollRef} className="h-[500px] overflow-y-auto p-4 space-y-3" data-testid="chat-messages">
+            {messages.length === 0 && (
+              <div className="text-center text-white/40 py-12">لا توجد رسائل بعد</div>
+            )}
+            {messages.map((m) => (
+              <ChatMessage
+                key={m.id}
+                m={m}
+                user={user}
+                isAdmin={isAdminFlag}
+                userClanId={userClanInChat}
+                onOpponentDecide={opponentDecide}
+                onAdminDecide={adminDecide}
+                matchClans={matchClans}
+              />
+            ))}
+          </div>
+
+          {canWrite ? (
+            <ChatComposer
+              text={text} image={image} video={video}
+              videoProgress={videoProgress}
+              isPlus={!!user?.is_plus}
+              onText={setText} onImage={onImage} onVideo={onVideo}
+              onClearImage={() => setImage(null)}
+              onClearVideo={() => setVideo(null)}
+              onSubmit={send}
+            />
+          ) : (
+            <div className="border-t b-soft p-4 text-center text-white/40 text-sm flex items-center justify-center gap-2" data-testid="chat-readonly">
+              <Lock size={14} /> الكتابة للقادة، النواب والمنظمين فقط
+            </div>
+          )}
+        </div>
+
+        <aside className="lg:sticky lg:top-20 self-start space-y-4">
+          <H2HWidget matchId={id} />
+          <LiveStreamsPanel matchId={id} />
+        </aside>
+      </div>
+    </div>
+  );
+}
