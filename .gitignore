@@ -106,3 +106,7 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+.env
+backend/.env
+frontend/.env
