@@ -26,9 +26,12 @@ You can also pass protocol URI directly (same behavior as browser deep-link):
 python guard_client.py "rivalsguard://connect?match_id=<id>&token=<session_token>"
 ```
 
-If the app is opened manually (without match arguments), it now shows a friendly GUI card:
+If the app is opened manually (without match arguments), it now shows an interactive **Arabic GUI**:
 
-`RivalsGuard Anti-Cheat is Active. Please launch matches directly from the Rivals platform.`
+- Title: `نظام RivalsGuard للحماية من الغش نشط وجاهز`
+- Includes step-by-step instructions for players
+- Includes `الانتقال إلى منصة Rivals` button (opens `https://rivalsesports.games/rivalsguard`)
+- Supports minimizing to System Tray and manual close (no sudden auto-close)
 
 ## Build Windows EXE (hidden console)
 

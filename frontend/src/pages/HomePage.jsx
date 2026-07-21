@@ -1,26 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api";
-import { Trophy, Swords, Users, Shield, Flame, Download, ShieldCheck } from "lucide-react";
+import { Trophy, Swords, Users, Shield, Flame } from "lucide-react";
 import HeroCarousel from "../components/HeroCarousel";
-
-function resolveGuardSetupUrl() {
-  const fallback = "/api/downloads/RivalsGuard.exe";
-  const raw = (process.env.REACT_APP_GUARD_SETUP_URL || "").trim();
-  if (!raw) return fallback;
-
-  const driveMatch = raw.match(/\/d\/([a-zA-Z0-9_-]{10,})\//);
-  if (driveMatch?.[1]) {
-    return `https://drive.google.com/uc?export=download&id=${driveMatch[1]}`;
-  }
-
-  const driveOpenMatch = raw.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
-  if (driveOpenMatch?.[1]) {
-    return `https://drive.google.com/uc?export=download&id=${driveOpenMatch[1]}`;
-  }
-
-  return raw;
-}
 
 function StatCard({ icon: Icon, label, value, testid, accent = "default" }) {
   const styles = {
@@ -98,7 +80,6 @@ export default function HomePage() {
   const [live, setLive] = useState([]);
   const [topClans, setTopClans] = useState([]);
   const [counts, setCounts] = useState({ live: 0, clans: 0, players: 0 });
-  const guardSetupUrl = resolveGuardSetupUrl();
 
   useEffect(() => {
     (async () => {
@@ -116,41 +97,6 @@ export default function HomePage() {
   return (
     <div className="space-y-10">
       <HeroCarousel />
-
-      <section className="rounded-2xl border border-emerald-400/20 bg-[radial-gradient(circle_at_20%_20%,rgba(16,185,129,0.15),transparent_45%),linear-gradient(135deg,rgba(2,6,23,0.95),rgba(17,24,39,0.92))] p-5 sm:p-7 shadow-[0_24px_90px_rgba(0,0,0,0.45)]">
-        <div className="grid gap-5 md:grid-cols-[1.45fr_1fr] items-center">
-          <div className="space-y-3 text-right">
-            <div className="inline-flex items-center gap-2 rounded-full border border-emerald-400/35 bg-emerald-500/10 px-3 py-1 text-[11px] font-bold tracking-widest text-emerald-300">
-              <ShieldCheck size={14} /> ANTI-CHEAT READY
-            </div>
-            <h2 className="font-display font-black text-2xl sm:text-3xl text-white leading-tight">
-              RivalsGuard حماية احترافية للمباريات الرسمية
-            </h2>
-            <p className="text-white/70 text-sm sm:text-base">
-              حمل النسخة الرسمية الآن وشغلها مباشرة قبل دخول اللوبّي. النسخة مهيأة للتشغيل من المنصة بضغطة واحدة.
-            </p>
-
-            <a
-              href={guardSetupUrl}
-              target="_blank"
-              rel="noreferrer"
-              data-testid="guard-setup-download-home"
-              className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 text-slate-950 px-5 py-2.5 font-black tracking-wide hover:bg-emerald-300 transition shadow-[0_10px_30px_rgba(16,185,129,0.35)]"
-            >
-              <Download size={16} /> RivalsGuard_Setup.zip
-            </a>
-          </div>
-
-          <div className="relative overflow-hidden rounded-xl border border-white/15 bg-black/25 p-3">
-            <img
-              src="/sbc-dark.png"
-              alt="RivalsGuard"
-              className="w-full h-[190px] sm:h-[220px] object-cover rounded-lg"
-            />
-            <div className="pointer-events-none absolute inset-0 rounded-xl bg-gradient-to-t from-black/40 via-transparent to-transparent" />
-          </div>
-        </div>
-      </section>
 
       {/* Stats */}
       <section className="grid grid-cols-2 md:grid-cols-4 gap-4">

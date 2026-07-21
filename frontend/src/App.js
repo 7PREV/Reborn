@@ -20,6 +20,7 @@ import LeaguesPage from "./pages/LeaguesPage";
 import LeagueDetailPage from "./pages/LeagueDetailPage";
 import ChampionsFactoryPage from "./pages/ChampionsFactoryPage";
 import NewsTransfersPage from "./pages/NewsTransfersPage";
+import RivalsGuardPage from "./pages/RivalsGuardPage";
 import OnboardingTour from "./components/OnboardingTour";
 import { Toaster } from "sonner";
 
@@ -54,6 +55,7 @@ function AppRoutes() {
         <Route path="/champions" element={<PublicShell><ChampionsFactoryPage /></PublicShell>} />
         <Route path="/champions-factory" element={<PublicShell><ChampionsFactoryPage /></PublicShell>} />
         <Route path="/news" element={<PublicShell><NewsTransfersPage /></PublicShell>} />
+        <Route path="/rivalsguard" element={<PublicShell><RivalsGuardPage /></PublicShell>} />
         <Route path="/rules" element={<PublicShell><RulesPage /></PublicShell>} />
         <Route path="/tournaments" element={<PublicShell><TournamentsPage /></PublicShell>} />
         <Route path="/tournaments/:id" element={<PublicShell><TournamentDetailPage /></PublicShell>} />

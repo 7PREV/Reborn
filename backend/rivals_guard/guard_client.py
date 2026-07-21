@@ -3,7 +3,9 @@ import ctypes
 import json
 import os
 import sys
+import threading
 import time
+import webbrowser
 import zipfile
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -11,7 +13,10 @@ from urllib.parse import urlparse, parse_qs
 import requests
 
 
-def _show_info_card(message: str, title: str = "RivalsGuard", auto_close_ms: int = 3800) -> None:
+RIVALS_GUARD_PAGE = "https://rivalsesports.games/rivalsguard"
+
+
+def _show_info_card(message: str, title: str = "RivalsGuard") -> None:
     try:
         import tkinter as tk
 
@@ -21,7 +26,7 @@ def _show_info_card(message: str, title: str = "RivalsGuard", auto_close_ms: int
         root.resizable(False, False)
         root.attributes("-topmost", True)
 
-        width, height = 520, 170
+        width, height = 560, 190
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
         x = max(0, int((screen_w - width) / 2))
@@ -33,12 +38,12 @@ def _show_info_card(message: str, title: str = "RivalsGuard", auto_close_ms: int
 
         title_lbl = tk.Label(
             frame,
-            text="🛡️ RivalsGuard Anti-Cheat",
+            text="🛡️ نظام الحماية RivalsGuard",
             fg="#F8FAFC",
             bg="#0B0D11",
             font=("Segoe UI", 14, "bold"),
-            anchor="w",
-            justify="left",
+            anchor="e",
+            justify="right",
         )
         title_lbl.pack(fill="x", padx=16, pady=(14, 6))
 
@@ -48,15 +53,15 @@ def _show_info_card(message: str, title: str = "RivalsGuard", auto_close_ms: int
             fg="#D1D5DB",
             bg="#0B0D11",
             font=("Segoe UI", 10),
-            wraplength=470,
-            justify="left",
-            anchor="w",
+            wraplength=500,
+            justify="right",
+            anchor="e",
         )
         body_lbl.pack(fill="x", padx=16, pady=(0, 14))
 
         ok_btn = tk.Button(
             frame,
-            text="OK",
+            text="إغلاق",
             command=root.destroy,
             bg="#10B981",
             fg="#07110D",
@@ -70,13 +75,191 @@ def _show_info_card(message: str, title: str = "RivalsGuard", auto_close_ms: int
         )
         ok_btn.pack(anchor="e", padx=16, pady=(0, 14))
 
-        root.after(max(1200, auto_close_ms), root.destroy)
         root.mainloop()
     except Exception:
         try:
             ctypes.windll.user32.MessageBoxW(0, message, title, 0x40)
         except Exception:
             pass
+
+
+def _open_platform_page() -> None:
+    try:
+        webbrowser.open(RIVALS_GUARD_PAGE)
+    except Exception:
+        pass
+
+
+def _show_manual_launcher_window() -> None:
+    try:
+        import tkinter as tk
+        from PIL import Image, ImageDraw
+        import pystray
+
+        root = tk.Tk()
+        root.title("RivalsGuard")
+        root.configure(bg="#0B0D11")
+        root.resizable(False, False)
+        root.attributes("-topmost", True)
+
+        width, height = 700, 420
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        x = max(0, int((screen_w - width) / 2))
+        y = max(0, int((screen_h - height) / 2))
+        root.geometry(f"{width}x{height}+{x}+{y}")
+
+        tray_state: dict[str, object] = {"icon": None}
+
+        def _stop_tray_icon() -> None:
+            icon = tray_state.get("icon")
+            if not icon:
+                return
+            try:
+                icon.stop()
+            except Exception:
+                pass
+            tray_state["icon"] = None
+
+        def _close_app() -> None:
+            _stop_tray_icon()
+            root.destroy()
+
+        def _restore_from_tray(icon=None, item=None) -> None:
+            _stop_tray_icon()
+            root.after(0, lambda: (root.deiconify(), root.lift(), root.focus_force()))
+
+        def _open_from_tray(icon=None, item=None) -> None:
+            _open_platform_page()
+
+        def _close_from_tray(icon=None, item=None) -> None:
+            root.after(0, _close_app)
+
+        def _minimize_to_tray() -> None:
+            try:
+                if tray_state.get("icon"):
+                    root.withdraw()
+                    return
+
+                icon_image = Image.new("RGBA", (64, 64), (11, 13, 17, 255))
+                draw = ImageDraw.Draw(icon_image)
+                draw.rounded_rectangle((4, 4, 60, 60), radius=12, fill=(16, 185, 129, 255))
+                draw.text((19, 18), "RG", fill=(7, 17, 13, 255))
+
+                menu = pystray.Menu(
+                    pystray.MenuItem("فتح النافذة", _restore_from_tray),
+                    pystray.MenuItem("الانتقال إلى منصة Rivals", _open_from_tray),
+                    pystray.MenuItem("إغلاق", _close_from_tray),
+                )
+                icon = pystray.Icon("RivalsGuard", icon_image, "RivalsGuard", menu)
+                tray_state["icon"] = icon
+
+                root.withdraw()
+                threading.Thread(target=icon.run, daemon=True).start()
+            except Exception:
+                root.iconify()
+
+        root.protocol("WM_DELETE_WINDOW", _minimize_to_tray)
+
+        frame = tk.Frame(root, bg="#0B0D11", highlightthickness=1, highlightbackground="#1F2937")
+        frame.pack(fill="both", expand=True, padx=14, pady=14)
+
+        title_lbl = tk.Label(
+            frame,
+            text="نظام RivalsGuard للحماية من الغش نشط وجاهز",
+            fg="#F8FAFC",
+            bg="#0B0D11",
+            font=("Segoe UI", 18, "bold"),
+            anchor="e",
+            justify="right",
+        )
+        title_lbl.pack(fill="x", padx=20, pady=(20, 8))
+
+        subtitle = tk.Label(
+            frame,
+            text="اتبع الخطوات التالية لبدء المباراة بأمان:",
+            fg="#9CA3AF",
+            bg="#0B0D11",
+            font=("Segoe UI", 11),
+            anchor="e",
+            justify="right",
+        )
+        subtitle.pack(fill="x", padx=20, pady=(0, 10))
+
+        steps_text = (
+            "1️⃣ افتح منصة Rivals في متصفحك.\n"
+            "2️⃣ انضم إلى مباراتك أو بطولتك مع كلانك.\n"
+            "3️⃣ اضغط زر \"بدء المباراة\" في الموقع، وسيتم تفعيل الحماية وتوجيهك أوتوماتيكياً."
+        )
+        steps_lbl = tk.Label(
+            frame,
+            text=steps_text,
+            fg="#E5E7EB",
+            bg="#0B0D11",
+            font=("Segoe UI", 11),
+            justify="right",
+            anchor="e",
+            wraplength=620,
+        )
+        steps_lbl.pack(fill="x", padx=20, pady=(0, 16))
+
+        button_row = tk.Frame(frame, bg="#0B0D11")
+        button_row.pack(fill="x", padx=20, pady=(0, 18))
+
+        open_btn = tk.Button(
+            button_row,
+            text="الانتقال إلى منصة Rivals",
+            command=_open_platform_page,
+            bg="#10B981",
+            fg="#07110D",
+            activebackground="#34D399",
+            activeforeground="#07110D",
+            relief="flat",
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 11, "bold"),
+            cursor="hand2",
+        )
+        open_btn.pack(side="right")
+
+        tray_btn = tk.Button(
+            button_row,
+            text="تصغير إلى شريط النظام",
+            command=_minimize_to_tray,
+            bg="#1F2937",
+            fg="#E5E7EB",
+            activebackground="#374151",
+            activeforeground="#FFFFFF",
+            relief="flat",
+            padx=12,
+            pady=7,
+            font=("Segoe UI", 10, "bold"),
+            cursor="hand2",
+        )
+        tray_btn.pack(side="right", padx=(0, 8))
+
+        close_btn = tk.Button(
+            button_row,
+            text="إغلاق",
+            command=_close_app,
+            bg="#111827",
+            fg="#D1D5DB",
+            activebackground="#1F2937",
+            activeforeground="#FFFFFF",
+            relief="flat",
+            padx=12,
+            pady=7,
+            font=("Segoe UI", 10, "bold"),
+            cursor="hand2",
+        )
+        close_btn.pack(side="left")
+
+        root.mainloop()
+    except Exception:
+        _show_info_card(
+            "نظام الحماية RivalsGuard نشط وجاهز — يرجى بدء المباريات من منصة Rivals مباشرة.",
+            title="RivalsGuard",
+        )
 
 
 def parse_deep_link(uri: str) -> dict:
@@ -164,10 +347,7 @@ def main():
 
     launched_without_context = (not args.deep_link) and (not args.match_id) and (not args.jwt)
     if launched_without_context:
-        _show_info_card(
-            "RivalsGuard Anti-Cheat is Active. Please launch matches directly from the Rivals platform.",
-            title="RivalsGuard",
-        )
+        _show_manual_launcher_window()
         return
 
     if args.deep_link:
@@ -179,9 +359,8 @@ def main():
 
     if not args.jwt or not args.match_id:
         _show_info_card(
-            "Unable to start Guard session: missing match context. Please launch from the Rivals website.",
+            "تعذر بدء جلسة الحماية: معلومات المباراة غير مكتملة. يرجى تشغيل المباراة من منصة Rivals.",
             title="RivalsGuard",
-            auto_close_ms=4800,
         )
         sys.exit(2)
 

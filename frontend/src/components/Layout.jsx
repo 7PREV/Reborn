@@ -2,40 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import api, { formatApiErrorDetail, notificationsList, notificationsRead } from "../api";
 import { useAuth } from "../AuthContext";
-import { Users, Swords, LogOut, Shield, Home as HomeIcon, ScrollText, Crown, Sparkles, Award, ShieldOff, Trophy, Instagram, Twitch, Music2, Bell, Check, X } from "lucide-react";
+import { Users, Swords, LogOut, Shield, Home as HomeIcon, ScrollText, Crown, Sparkles, Award, ShieldOff, Trophy, Instagram, Twitch, Music2, Bell, Check, X, ShieldCheck } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { toast } from "sonner";
 
 const attendancePromptShownInCurrentPageLoad = new Set();
 
-function resolveGuardSetupUrl() {
-  const fallback = "/api/downloads/RivalsGuard.exe";
-  const raw = (process.env.REACT_APP_GUARD_SETUP_URL || "").trim();
-  if (!raw) return fallback;
-
-  const driveMatch = raw.match(/\/d\/([a-zA-Z0-9_-]{10,})\//);
-  if (driveMatch?.[1]) {
-    return `https://drive.google.com/uc?export=download&id=${driveMatch[1]}`;
-  }
-
-  const driveOpenMatch = raw.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
-  if (driveOpenMatch?.[1]) {
-    return `https://drive.google.com/uc?export=download&id=${driveOpenMatch[1]}`;
-  }
-
-  const repo = (process.env.REACT_APP_GITHUB_REPOSITORY || "").trim();
-  if (repo && raw.includes("<OWNER>/<REPO>")) {
-    return raw.replace("<OWNER>/<REPO>", repo);
-  }
-  return raw;
-}
-
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const isPlusMember = !!(user?.is_plus || user?.is_personal_plus || user?.plan === "plus");
-  const guardSetupUrl = resolveGuardSetupUrl();
 
   const nav = [
     { to: "/", label: "الرئيسية", icon: HomeIcon, id: "nav-home" },
@@ -46,6 +23,7 @@ export default function Layout({ children }) {
     { to: "/players", label: "اللاعبون", icon: Users, id: "nav-players" },
     { to: "/news", label: "الأخبار", icon: ScrollText, id: "nav-news" },
     { to: "/champions", label: "الأبطال", icon: Trophy, id: "nav-champions-factory" },
+    { to: "/rivalsguard", label: "RivalsGuard", icon: ShieldCheck, id: "nav-rivalsguard" },
     { to: "/rules", label: "القوانين", icon: ScrollText, id: "nav-rules" },
     { to: "/plus", label: "PLUS", icon: Sparkles, id: "nav-plus" },
     { to: "/blacklist", label: "القائمة السوداء", icon: ShieldOff, id: "nav-blacklist" },
@@ -129,16 +107,6 @@ export default function Layout({ children }) {
           </nav>
 
           <div className="flex-1" />
-
-          <a
-            href={guardSetupUrl}
-            target="_blank"
-            rel="noreferrer"
-            data-testid="guard-setup-download"
-            className="hidden md:inline-flex items-center gap-1.5 text-xs uppercase tracking-widest text-emerald-300 hover:text-emerald-200 border border-emerald-500/35 rounded-md px-3 py-1.5"
-          >
-            🛡️ RivalsGuard_Setup.zip
-          </a>
 
        {/* قسم الشعار - يعرض الأيقونة البيضاء فقط ويخفي النص المدمج داخل الصورة تلقائياً */}
           <Link to="/" className="flex items-center group transition-transform duration-200 hover:scale-[1.05]" data-testid="logo-link">
@@ -584,6 +552,7 @@ function SiteFooter() {
           <ul className="space-y-1.5 text-sm">
             <li><a href="/rules" className="text-white/70 hover:text-gold-500">القوانين</a></li>
             <li><a href="/leagues" className="text-white/70 hover:text-gold-500">الدوريات</a></li>
+            <li><a href="/rivalsguard" className="text-white/70 hover:text-gold-500">نظام RivalsGuard</a></li>
             <li><a href="/plus" className="text-white/70 hover:text-gold-500">PLUS</a></li>
             <li><a href="/blacklist" className="text-white/70 hover:text-gold-500">القائمة السوداء</a></li>
           </ul>
