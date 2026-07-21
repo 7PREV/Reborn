@@ -15,7 +15,9 @@ py -m PyInstaller --clean --noconfirm --onefile --windowed --name RivalsGuard gu
 echo [4/5] Copying EXE to backend\static\downloads...
 if not exist ..\static\downloads mkdir ..\static\downloads
 copy /Y dist\RivalsGuard.exe ..\static\downloads\RivalsGuard.exe >nul
+if exist ..\static\downloads\RivalsGuard_Setup.zip del /f /q ..\static\downloads\RivalsGuard_Setup.zip
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '..\static\downloads\RivalsGuard.exe' -DestinationPath '..\static\downloads\RivalsGuard_Setup.zip' -Force"
 
 echo [5/5] Done.
-echo Output: backend\static\downloads\RivalsGuard.exe
+echo Output: backend\static\downloads\RivalsGuard_Setup.zip
 pause

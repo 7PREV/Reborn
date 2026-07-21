@@ -1,9 +1,8 @@
 import { ShieldCheck, Download, Link2, Lock, MonitorCheck, CheckCircle2 } from "lucide-react";
 
 function resolveGuardSetupUrl() {
-  const fallback = "/api/downloads/RivalsGuard.exe";
   const raw = (process.env.REACT_APP_GUARD_SETUP_URL || "").trim();
-  if (!raw) return fallback;
+  if (!raw) return "";
 
   const driveMatch = raw.match(/\/d\/([a-zA-Z0-9_-]{10,})\//);
   if (driveMatch?.[1]) {
@@ -15,7 +14,11 @@ function resolveGuardSetupUrl() {
     return `https://drive.google.com/uc?export=download&id=${driveOpenMatch[1]}`;
   }
 
-  return raw;
+  if (raw.includes("drive.google.com")) {
+    return raw;
+  }
+
+  return "";
 }
 
 function Step({ index, title, desc }) {
@@ -54,15 +57,21 @@ export default function RivalsGuardPage() {
         </div>
 
         <div className="mt-6 flex flex-wrap items-center gap-3">
-          <a
-            href={guardSetupUrl}
-            target="_blank"
-            rel="noreferrer"
-            data-testid="rivalsguard-download-btn"
-            className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 text-slate-950 px-5 py-2.5 font-black tracking-wide hover:bg-emerald-300 transition shadow-[0_10px_30px_rgba(16,185,129,0.35)]"
-          >
-            <Download size={16} /> تحميل RivalsGuard_Setup.zip
-          </a>
+          {guardSetupUrl ? (
+            <a
+              href={guardSetupUrl}
+              target="_blank"
+              rel="noreferrer"
+              data-testid="rivalsguard-download-btn"
+              className="inline-flex items-center gap-2 rounded-xl bg-emerald-400 text-slate-950 px-5 py-2.5 font-black tracking-wide hover:bg-emerald-300 transition shadow-[0_10px_30px_rgba(16,185,129,0.35)]"
+            >
+              <Download size={16} /> تحميل RivalsGuard_Setup.zip
+            </a>
+          ) : (
+            <div className="inline-flex items-center gap-2 rounded-xl border border-amber-400/35 bg-amber-500/10 text-amber-200 px-4 py-2 text-sm">
+              <Download size={15} /> رابط Google Drive غير مضبوط حالياً.
+            </div>
+          )}
           <a
             href="https://rivalsesports.games/matches"
             target="_blank"

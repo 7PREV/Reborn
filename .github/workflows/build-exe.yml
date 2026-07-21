@@ -37,17 +37,21 @@ jobs:
         run: |
           pyinstaller --clean --noconfirm --onefile --windowed --name RivalsGuard guard_client.py
 
-      - name: Copy EXE to public backend folder
+      - name: Package RivalsGuard_Setup.zip
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path backend/static/downloads | Out-Null
           Copy-Item -Path backend/rivals_guard/dist/RivalsGuard.exe -Destination backend/static/downloads/RivalsGuard.exe -Force
+          if (Test-Path backend/static/downloads/RivalsGuard_Setup.zip) {
+            Remove-Item backend/static/downloads/RivalsGuard_Setup.zip -Force
+          }
+          Compress-Archive -Path backend/static/downloads/RivalsGuard.exe -DestinationPath backend/static/downloads/RivalsGuard_Setup.zip -Force
 
-      - name: Upload EXE artifact
+      - name: Upload ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RivalsGuard-windows-exe
-          path: backend/static/downloads/RivalsGuard.exe
+          name: RivalsGuard-windows-zip
+          path: backend/static/downloads/RivalsGuard_Setup.zip
           if-no-files-found: error
 
       - name: Publish/Update stable GitHub Release
@@ -58,9 +62,9 @@ jobs:
           name: RivalsGuard Latest
           body: |
             Automated Windows build of Rivals Guard.
-            Download: RivalsGuard.exe
-          artifacts: backend/static/downloads/RivalsGuard.exe
-          artifactContentType: application/vnd.microsoft.portable-executable
+            Download: RivalsGuard_Setup.zip
+          artifacts: backend/static/downloads/RivalsGuard_Setup.zip
+          artifactContentType: application/zip
           allowUpdates: true
           replacesArtifacts: true
           removeArtifacts: true
@@ -74,7 +78,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backend/static/downloads/RivalsGuard.exe
+          git add backend/static/downloads/RivalsGuard.exe backend/static/downloads/RivalsGuard_Setup.zip
           if git diff --cached --quiet; then
             echo "No EXE change to commit."
             exit 0

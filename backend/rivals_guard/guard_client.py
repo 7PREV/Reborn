@@ -97,7 +97,7 @@ def _show_manual_launcher_window() -> None:
         import pystray
 
         root = tk.Tk()
-        root.title("RivalsGuard")
+        root.title("نظام الحماية RivalsGuard")
         root.configure(bg="#0B0D11")
         root.resizable(False, False)
         root.attributes("-topmost", True)
@@ -135,8 +135,11 @@ def _show_manual_launcher_window() -> None:
         def _close_from_tray(icon=None, item=None) -> None:
             root.after(0, _close_app)
 
+        tray_minimizing = {"active": False}
+
         def _minimize_to_tray() -> None:
             try:
+                tray_minimizing["active"] = True
                 if tray_state.get("icon"):
                     root.withdraw()
                     return
@@ -158,15 +161,28 @@ def _show_manual_launcher_window() -> None:
                 threading.Thread(target=icon.run, daemon=True).start()
             except Exception:
                 root.iconify()
+            finally:
+                tray_minimizing["active"] = False
 
         root.protocol("WM_DELETE_WINDOW", _minimize_to_tray)
+
+        def _on_unmap(_event=None):
+            try:
+                if tray_minimizing["active"]:
+                    return
+                if root.state() == "iconic":
+                    _minimize_to_tray()
+            except Exception:
+                pass
+
+        root.bind("<Unmap>", _on_unmap)
 
         frame = tk.Frame(root, bg="#0B0D11", highlightthickness=1, highlightbackground="#1F2937")
         frame.pack(fill="both", expand=True, padx=14, pady=14)
 
         title_lbl = tk.Label(
             frame,
-            text="نظام RivalsGuard للحماية من الغش نشط وجاهز",
+            text="نظام الحماية RivalsGuard",
             fg="#F8FAFC",
             bg="#0B0D11",
             font=("Segoe UI", 18, "bold"),
@@ -177,7 +193,7 @@ def _show_manual_launcher_window() -> None:
 
         subtitle = tk.Label(
             frame,
-            text="اتبع الخطوات التالية لبدء المباراة بأمان:",
+            text="نظام RivalsGuard نشط وجاهز. يرجى بدء المباريات مباشرة من منصة Rivals.",
             fg="#9CA3AF",
             bg="#0B0D11",
             font=("Segoe UI", 11),
@@ -240,8 +256,8 @@ def _show_manual_launcher_window() -> None:
 
         close_btn = tk.Button(
             button_row,
-            text="إغلاق",
-            command=_close_app,
+            text="إخفاء إلى الخلفية",
+            command=_minimize_to_tray,
             bg="#111827",
             fg="#D1D5DB",
             activebackground="#1F2937",

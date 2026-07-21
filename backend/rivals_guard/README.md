@@ -41,6 +41,10 @@ Use PyInstaller with `--windowed` so no black CMD window appears to players:
 pyinstaller --clean --noconfirm --onefile --windowed --name RivalsGuard guard_client.py
 ```
 
+Recommended distribution format:
+
+- `RivalsGuard_Setup.zip` (contains `RivalsGuard.exe`)
+
 ## Protocol registration (Windows)
 Register `rivalsguard://` URI handler during installer setup and forward `%1` to the EXE.
 
