@@ -20,5 +20,31 @@ pip install -r requirements.txt
 python guard_client.py --api http://localhost:8000 --match-id <match_id> --token <session_token>
 ```
 
+You can also pass protocol URI directly (same behavior as browser deep-link):
+
+```bash
+python guard_client.py "rivalsguard://connect?match_id=<id>&token=<session_token>"
+```
+
+If the app is opened manually (without match arguments), it now shows a friendly GUI card:
+
+`RivalsGuard Anti-Cheat is Active. Please launch matches directly from the Rivals platform.`
+
+## Build Windows EXE (hidden console)
+
+Use PyInstaller with `--windowed` so no black CMD window appears to players:
+
+```bash
+pyinstaller --clean --noconfirm --onefile --windowed --name RivalsGuard guard_client.py
+```
+
 ## Protocol registration (Windows)
-Register `rivalsguard://` URI handler during installer setup and forward arguments to `guard_client.py`.
+Register `rivalsguard://` URI handler during installer setup and forward `%1` to the EXE.
+
+You can import the template at:
+
+- `backend/rivals_guard/windows/register_rivalsguard_protocol.reg`
+
+After registration, clicking a Rivals deep-link will launch:
+
+`RivalsGuard.exe "rivalsguard://connect?match_id=...&token=..."`

@@ -1,0 +1,15 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\Software\Classes\rivalsguard]
+@="URL:RivalsGuard Protocol"
+"URL Protocol"=""
+
+[HKEY_CURRENT_USER\Software\Classes\rivalsguard\DefaultIcon]
+@="\"C:\\Program Files\\RivalsGuard\\RivalsGuard.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\rivalsguard\shell]
+
+[HKEY_CURRENT_USER\Software\Classes\rivalsguard\shell\open]
+
+[HKEY_CURRENT_USER\Software\Classes\rivalsguard\shell\open\command]
+@="\"C:\\Program Files\\RivalsGuard\\RivalsGuard.exe\" \"%1\""

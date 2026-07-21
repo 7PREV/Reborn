@@ -10,7 +10,7 @@ py -m pip install -r backend\rivals_guard\requirements.txt pyinstaller
 
 echo [3/5] Building RivalsGuard.exe...
 cd /d backend\rivals_guard
-py -m PyInstaller --clean --noconfirm --onefile --name RivalsGuard guard_client.py
+py -m PyInstaller --clean --noconfirm --onefile --windowed --name RivalsGuard guard_client.py
 
 echo [4/5] Copying EXE to backend\static\downloads...
 if not exist ..\static\downloads mkdir ..\static\downloads

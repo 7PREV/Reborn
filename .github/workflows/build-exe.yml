@@ -35,7 +35,7 @@ jobs:
       - name: Build RivalsGuard.exe
         working-directory: backend/rivals_guard
         run: |
-          pyinstaller --clean --noconfirm --onefile --name RivalsGuard guard_client.py
+          pyinstaller --clean --noconfirm --onefile --windowed --name RivalsGuard guard_client.py
 
       - name: Copy EXE to public backend folder
         shell: pwsh
