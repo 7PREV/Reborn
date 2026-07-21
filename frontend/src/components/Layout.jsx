@@ -14,6 +14,16 @@ function resolveGuardSetupUrl() {
   const raw = (process.env.REACT_APP_GUARD_SETUP_URL || "").trim();
   if (!raw) return fallback;
 
+  const driveMatch = raw.match(/\/d\/([a-zA-Z0-9_-]{10,})\//);
+  if (driveMatch?.[1]) {
+    return `https://drive.google.com/uc?export=download&id=${driveMatch[1]}`;
+  }
+
+  const driveOpenMatch = raw.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
+  if (driveOpenMatch?.[1]) {
+    return `https://drive.google.com/uc?export=download&id=${driveOpenMatch[1]}`;
+  }
+
   const repo = (process.env.REACT_APP_GITHUB_REPOSITORY || "").trim();
   if (repo && raw.includes("<OWNER>/<REPO>")) {
     return raw.replace("<OWNER>/<REPO>", repo);
@@ -127,7 +137,7 @@ export default function Layout({ children }) {
             data-testid="guard-setup-download"
             className="hidden md:inline-flex items-center gap-1.5 text-xs uppercase tracking-widest text-emerald-300 hover:text-emerald-200 border border-emerald-500/35 rounded-md px-3 py-1.5"
           >
-            🛡️ Rivals Guard Setup
+            🛡️ RivalsGuard_Setup.zip
           </a>
 
        {/* قسم الشعار - يعرض الأيقونة البيضاء فقط ويخفي النص المدمج داخل الصورة تلقائياً */}
