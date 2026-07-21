@@ -14,6 +14,20 @@ import requests
 
 
 RIVALS_GUARD_PAGE = "https://rivalsesports.games/rivalsguard"
+ICON_PNG_REL = "assets/rivalsguard_icon.png"
+
+
+def _resource_path(rel_path: str) -> str:
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / rel_path)
+    candidates.append(Path(__file__).resolve().parent / rel_path)
+
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return str(candidates[-1])
 
 
 def _show_info_card(message: str, title: str = "RivalsGuard") -> None:
@@ -25,6 +39,13 @@ def _show_info_card(message: str, title: str = "RivalsGuard") -> None:
         root.configure(bg="#0B0D11")
         root.resizable(False, False)
         root.attributes("-topmost", True)
+
+        try:
+            icon_img = tk.PhotoImage(file=_resource_path(ICON_PNG_REL))
+            root.iconphoto(True, icon_img)
+            root._icon_img_ref = icon_img
+        except Exception:
+            pass
 
         width, height = 560, 190
         screen_w = root.winfo_screenwidth()
@@ -102,6 +123,13 @@ def _show_manual_launcher_window() -> None:
         root.resizable(False, False)
         root.attributes("-topmost", True)
 
+        try:
+            icon_img = tk.PhotoImage(file=_resource_path(ICON_PNG_REL))
+            root.iconphoto(True, icon_img)
+            root._icon_img_ref = icon_img
+        except Exception:
+            pass
+
         width, height = 700, 420
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
@@ -144,10 +172,14 @@ def _show_manual_launcher_window() -> None:
                     root.withdraw()
                     return
 
-                icon_image = Image.new("RGBA", (64, 64), (11, 13, 17, 255))
-                draw = ImageDraw.Draw(icon_image)
-                draw.rounded_rectangle((4, 4, 60, 60), radius=12, fill=(16, 185, 129, 255))
-                draw.text((19, 18), "RG", fill=(7, 17, 13, 255))
+                icon_path = _resource_path(ICON_PNG_REL)
+                if os.path.exists(icon_path):
+                    icon_image = Image.open(icon_path).convert("RGBA")
+                else:
+                    icon_image = Image.new("RGBA", (64, 64), (11, 13, 17, 255))
+                    draw = ImageDraw.Draw(icon_image)
+                    draw.rounded_rectangle((4, 4, 60, 60), radius=12, fill=(16, 185, 129, 255))
+                    draw.text((19, 18), "RG", fill=(7, 17, 13, 255))
 
                 menu = pystray.Menu(
                     pystray.MenuItem("فتح النافذة", _restore_from_tray),

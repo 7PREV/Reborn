@@ -35,7 +35,7 @@ jobs:
       - name: Build RivalsGuard.exe
         working-directory: backend/rivals_guard
         run: |
-          pyinstaller --clean --noconfirm --onefile --windowed --name RivalsGuard guard_client.py
+          pyinstaller --clean --noconfirm --onefile --windowed --name RivalsGuard --icon assets/rivalsguard_icon.ico --add-data "assets/rivalsguard_icon.png;assets" guard_client.py
 
       - name: Package RivalsGuard_Setup.zip
         shell: pwsh

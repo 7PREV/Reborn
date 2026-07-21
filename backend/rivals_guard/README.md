@@ -38,12 +38,15 @@ If the app is opened manually (without match arguments), it now shows an interac
 Use PyInstaller with `--windowed` so no black CMD window appears to players:
 
 ```bash
-pyinstaller --clean --noconfirm --onefile --windowed --name RivalsGuard guard_client.py
+pyinstaller --clean --noconfirm --onefile --windowed --name RivalsGuard --icon assets/rivalsguard_icon.ico --add-data "assets/rivalsguard_icon.png;assets" guard_client.py
 ```
 
 Recommended distribution format:
 
 - `RivalsGuard_Setup.zip` (contains `RivalsGuard.exe`)
+- The EXE, taskbar, and tray now use the embedded app icon from:
+   - `backend/rivals_guard/assets/rivalsguard_icon.ico`
+   - `backend/rivals_guard/assets/rivalsguard_icon.png`
 
 ## Protocol registration (Windows)
 Register `rivalsguard://` URI handler during installer setup and forward `%1` to the EXE.
