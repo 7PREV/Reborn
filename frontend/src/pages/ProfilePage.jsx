@@ -1,11 +1,50 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import api, { billingSubscription, formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { Shield, Trophy, Mail, Check, X, Sparkles, Tv, Save, RefreshCw, Lock, Image as ImageIcon, Palette, Twitch, Flame, Swords } from "lucide-react";
+import { Shield, Trophy, Mail, Check, X, Sparkles, Save, RefreshCw, Lock, Flame, Swords, Copy, Pencil } from "lucide-react";
+import { FaTwitch, FaYoutube, FaTiktok, FaInstagram, FaXTwitter, FaDiscord } from "react-icons/fa6";
+import { FaPenToSquare } from "react-icons/fa6";
+import { SiKick } from "react-icons/si";
 import { toast } from "sonner";
 
 const ACT_COOLDOWN_DAYS = 14;
+const PROFILE_DRAFT_FIELDS = [
+  "act",
+  "discord_username",
+  "twitch_url",
+  "kick_url",
+  "youtube_url",
+  "tiktok_url",
+  "instagram_link",
+  "x_link",
+  "accent_color",
+  "avatar",
+  "banner",
+];
+
+function toProfileDraft(u) {
+  if (!u) return null;
+  return {
+    act: u.act || "",
+    discord_username: u.discord_username || "",
+    twitch_url: u.twitch_url || "",
+    kick_url: u.kick_url || "",
+    youtube_url: u.youtube_url || "",
+    tiktok_url: u.tiktok_url || "",
+    instagram_link: u.instagram_link || "",
+    x_link: u.x_link || "",
+    accent_color: u.accent_color || "#FFCC00",
+    avatar: u.avatar || null,
+    banner: u.banner || null,
+  };
+}
+
+function isProfileDraftDirty(user, draft) {
+  if (!user || !draft) return false;
+  const base = toProfileDraft(user);
+  return PROFILE_DRAFT_FIELDS.some((k) => (draft?.[k] ?? null) !== (base?.[k] ?? null));
+}
 
 function formatActCooldown(changedAt) {
   if (!changedAt) return null;
@@ -24,11 +63,13 @@ function formatActCooldown(changedAt) {
 export default function ProfilePage() {
   const { user, refresh } = useAuth();
   const [invites, setInvites] = useState([]);
-  const [streamForm, setStreamForm] = useState({ twitch_url: "", kick_url: "", youtube_url: "", tiktok_url: "", act: "" });
-  const [savingStreams, setSavingStreams] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const [savingDraft, setSavingDraft] = useState(false);
   const [archivedClan, setArchivedClan] = useState(null);
   const [clanMembersCount, setClanMembersCount] = useState(0);
   const [billingStatus, setBillingStatus] = useState(null);
+  const [referralStats, setReferralStats] = useState(null);
+  const [copiedReferral, setCopiedReferral] = useState(false);
 
   const load = async () => {
     try {
@@ -47,15 +88,10 @@ export default function ProfilePage() {
   }, [user]);
   useEffect(() => {
     if (user) {
-      setStreamForm({
-        twitch_url: user.twitch_url || "",
-        kick_url: user.kick_url || "",
-        youtube_url: user.youtube_url || "",
-        tiktok_url: user.tiktok_url || "",
-        act: user.act || "",
-      });
+      setDraft(toProfileDraft(user));
       api.get("/me/archived-clan").then((r) => setArchivedClan(r.data)).catch(() => setArchivedClan(null));
       billingSubscription().then((r) => setBillingStatus(r.data)).catch(() => setBillingStatus(null));
+      api.get("/me/referrals").then((r) => setReferralStats(r.data)).catch(() => setReferralStats(null));
       if (user.clan_id) {
         api.get(`/clans/${user.clan_id}`)
           .then((r) => {
@@ -71,20 +107,6 @@ export default function ProfilePage() {
       }
     }
   }, [user]);
-
-  const saveStreams = async (e) => {
-    e.preventDefault();
-    setSavingStreams(true);
-    try {
-      await api.put("/me/profile", streamForm);
-      toast.success("تم حفظ الملف الشخصي");
-      await refresh();
-    } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail));
-    } finally {
-      setSavingStreams(false);
-    }
-  };
 
   const restoreClan = async () => {
     if (!archivedClan) return;
@@ -115,6 +137,52 @@ export default function ProfilePage() {
     }
   };
 
+  const copyReferralLink = async () => {
+    const link = referralStats?.referral_link;
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopiedReferral(true);
+      toast.success("Copied!");
+      setTimeout(() => setCopiedReferral(false), 2000);
+    } catch {
+      toast.error("تعذر نسخ الرابط");
+    }
+  };
+
+  const onFieldChange = (key, value) => {
+    setDraft((prev) => ({ ...(prev || {}), [key]: value }));
+  };
+
+  const discardDraft = () => {
+    if (!user) return;
+    setDraft(toProfileDraft(user));
+    toast.success("تم تجاهل التعديلات");
+  };
+
+  const saveDraft = async () => {
+    if (!user || !draft || savingDraft) return;
+    const base = toProfileDraft(user);
+    const payload = {};
+    for (const k of PROFILE_DRAFT_FIELDS) {
+      if ((draft?.[k] ?? null) !== (base?.[k] ?? null)) {
+        payload[k] = draft?.[k];
+      }
+    }
+    if (Object.keys(payload).length === 0) return;
+    setSavingDraft(true);
+    try {
+      const { data } = await api.put("/me/profile", payload);
+      setDraft(toProfileDraft(data));
+      await refresh();
+      toast.success("✅ تم حفظ التغييرات");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
   const togglePlus = async () => {
     const activating = !user.is_plus;
     if (activating && clanMembersCount < 6) {
@@ -131,16 +199,26 @@ export default function ProfilePage() {
 
   if (!user) return null;
 
+  const profileView = { ...user, ...(draft || {}) };
   const isPlus = !!user.is_personal_plus;
   const canActivateTrialPlus = user.is_plus || clanMembersCount >= 6;
-  const accent = (isPlus && user.accent_color) || "#FFCC00";
-  const bannerStyle = isPlus && user.banner
-    ? { backgroundImage: `url(${user.banner})`, backgroundSize: "cover", backgroundPosition: "center" }
-    : { background: `linear-gradient(135deg, ${accent}22, transparent 80%)` };
+  const accent = (isPlus && profileView.accent_color) || "#FFCC00";
+  const bannerStyle = isPlus && profileView.banner
+    ? { backgroundImage: `url(${profileView.banner})`, backgroundSize: "cover", backgroundPosition: "center" }
+    : { backgroundColor: accent };
+  const hasDraftChanges = isProfileDraftDirty(user, draft);
 
   return (
     <div className="space-y-8">
-      <PremiumProfileHeader user={user} accent={accent} bannerStyle={bannerStyle} />
+      <PremiumProfileHeader
+        user={profileView}
+        rawUser={user}
+        draft={draft}
+        accent={accent}
+        isPlus={isPlus}
+        bannerStyle={bannerStyle}
+        onFieldChange={onFieldChange}
+      />
 
       {user.clan_id && (
         <Link to={`/clans/${user.clan_id}`} data-testid="profile-clan-link" className="block bg-surface border b-soft rounded-xl p-5 hover:border-gold-500/30">
@@ -154,10 +232,50 @@ export default function ProfilePage() {
         </Link>
       )}
 
-      {isPlus && (
-        <PersonalPlusCustomizer user={user} />
-      )}
+      <section className="bg-surface border b-soft rounded-xl p-6" data-testid="referrals-rewards-card">
+        <div className="flex items-center gap-2 mb-3">
+          <Sparkles className="text-emerald-400" size={18} />
+          <h2 className="font-display font-black text-xl">الإحالات والمكافآت</h2>
+        </div>
 
+        <div className="grid md:grid-cols-3 gap-3 mb-4">
+          <div className="rounded-lg border b-soft bg-background/40 p-3">
+            <div className="text-[10px] uppercase tracking-widest text-white/40">الرصيد الحالي</div>
+            <div className="font-display font-black text-2xl text-emerald-300">🪙 {Number(referralStats?.riv_points ?? user?.riv_points ?? 0)} RIV</div>
+          </div>
+          <div className="rounded-lg border b-soft bg-background/40 p-3">
+            <div className="text-[10px] uppercase tracking-widest text-white/40">عدد المدعوين</div>
+            <div className="font-display font-black text-2xl text-gold-500">{Number(referralStats?.invited_count || 0)}</div>
+          </div>
+          <div className="rounded-lg border b-soft bg-background/40 p-3">
+            <div className="text-[10px] uppercase tracking-widest text-white/40">مكافأة كل دعوة</div>
+            <div className="font-display font-black text-2xl text-emerald-300">+{Number(referralStats?.reward_per_invite || 1)} RIV</div>
+          </div>
+        </div>
+
+        <div className="text-xs text-white/50 mb-2">رابط الإحالة الخاص بك</div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            readOnly
+            value={referralStats?.referral_link || ""}
+            className="flex-1 min-w-[220px] bg-background border b-soft rounded-md px-3 py-2 text-sm text-white/80"
+          />
+          <button
+            type="button"
+            onClick={copyReferralLink}
+            className={`px-3 py-2 rounded-md font-bold inline-flex items-center gap-1.5 transition-all duration-300 ${copiedReferral ? "bg-emerald-400 text-black shadow-[0_0_22px_rgba(16,185,129,0.8)] ring-1 ring-emerald-300" : "bg-emerald-500 text-black hover:bg-emerald-400"}`}
+          >
+            <Copy size={14} /> {copiedReferral ? "Copied! ✓" : "Copy Link"}
+          </button>
+        </div>
+
+        <div className="mt-4 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+          <div className="font-bold text-emerald-300 mb-2">❓ ما هي نقاط RIV وكيف تستفيد منها؟</div>
+          <p className="text-sm text-white/75 leading-7">
+            نقاط RIV هي العملة الخاصة بـ RIVALS (كل نقطة تساوي 1 ريال)! يمكنك جمع النقاط بسهولة عن طريق مشاركة رابط الإحالة الخاص بك مع أصدقائك؛ حيث ستحصل على نقطة واحدة (1 RIV) فور تسجيل وتأكيد حساب كل شخص يدخل عن طريقك. يمكنك لاحقاً استخدام هذه النقاط لشراء أو تجديد اشتراكك مجاناً بالكامل دون الحاجة للدفع بالفيزا! (اشتراك Personal Plus بـ 11 نقطة فقط، واشتراك Clan Plus بـ 27 نقطة فقط).
+          </p>
+        </div>
+      </section>
       <div className={`rounded-xl p-6 border ${user.is_plus ? "border-gold-500/40 bg-gold-500/5" : "border-white/5 bg-surface"}`}>
         <div className="flex items-center gap-3 mb-3">
           <Sparkles className="text-gold-500" />
@@ -199,87 +317,6 @@ export default function ProfilePage() {
           </div>
         )}
       </div>
-
-      <section data-testid="streams-section" className="bg-surface border b-soft rounded-xl p-6">
-        <h2 className="font-display font-black text-xl mb-3 flex items-center gap-2">
-          <Tv className="text-gold-500" size={20} /> روابط البث المباشر و Activision
-        </h2>
-        <form onSubmit={saveStreams} className="space-y-3">
-          <div>
-            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block flex items-center gap-1">
-              Activision ID
-              {formatActCooldown(user.act_changed_at) && <Lock size={12} className="text-destructive" />}
-            </label>
-            <input
-              data-testid="profile-act-input"
-              value={streamForm.act}
-              onChange={(e) => setStreamForm({ ...streamForm, act: e.target.value })}
-              minLength={2}
-              maxLength={40}
-              disabled={!!formatActCooldown(user.act_changed_at)}
-              placeholder="YourName#1234"
-              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            />
-            {formatActCooldown(user.act_changed_at) ? (
-              <div data-testid="act-cooldown-msg" className="text-[11px] text-destructive mt-1">
-                لا يمكنك تغيير الـ Activision ID إلا مرة كل أسبوعين. المتبقي: {formatActCooldown(user.act_changed_at)}
-              </div>
-            ) : (
-              <div className="text-[10px] text-white/40 mt-1">⚠️ بعد التغيير يصبح مغلقًا لمدة 14 يومًا.</div>
-            )}
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">Twitch URL</label>
-            <input
-              data-testid="profile-twitch-input"
-              value={streamForm.twitch_url}
-              onChange={(e) => setStreamForm({ ...streamForm, twitch_url: e.target.value })}
-              placeholder="https://twitch.tv/yourname"
-              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
-            />
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">Kick URL</label>
-            <input
-              data-testid="profile-kick-input"
-              value={streamForm.kick_url}
-              onChange={(e) => setStreamForm({ ...streamForm, kick_url: e.target.value })}
-              placeholder="https://kick.com/yourname"
-              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
-            />
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">YouTube URL</label>
-            <input
-              data-testid="profile-youtube-input"
-              value={streamForm.youtube_url}
-              onChange={(e) => setStreamForm({ ...streamForm, youtube_url: e.target.value })}
-              placeholder="https://www.youtube.com/@yourchannel/live"
-              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
-            />
-            <div className="text-[10px] text-white/40 mt-1">يفضل إدخال رابط /live للقناة لتحسين كشف البث المباشر.</div>
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-widest text-white/50 mb-1 block">TikTok URL (رابط فقط)</label>
-            <input
-              data-testid="profile-tiktok-input"
-              value={streamForm.tiktok_url}
-              onChange={(e) => setStreamForm({ ...streamForm, tiktok_url: e.target.value })}
-              placeholder="https://tiktok.com/@yourname"
-              className="w-full bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
-            />
-            <div className="text-[10px] text-white/40 mt-1">TikTok يظهر كرابط في الملف الشخصي فقط (لا يدعم كشف البث المباشر).</div>
-          </div>
-          <button
-            data-testid="save-profile-btn"
-            type="submit"
-            disabled={savingStreams}
-            className="px-4 py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 disabled:opacity-50 flex items-center gap-2"
-          >
-            <Save size={14} /> {savingStreams ? "..." : "حفظ"}
-          </button>
-        </form>
-      </section>
 
       {archivedClan && !user.clan_id && (
         <div data-testid="restore-clan-card" className="bg-gold-500/5 border border-gold-500/30 rounded-xl p-5 flex items-center gap-3 flex-wrap">
@@ -332,13 +369,19 @@ export default function ProfilePage() {
           </div>
         )}
       </section>
+
+      <ProfileDraftActionBar
+        visible={hasDraftChanges}
+        saving={savingDraft}
+        onSave={saveDraft}
+        onDiscard={discardDraft}
+      />
     </div>
   );
 }
 
 // --------------- Premium profile header ----------------
-function PremiumProfileHeader({ user, accent, bannerStyle }) {
-  const isPlus = !!(user.is_personal_plus || user.is_plus || user.plan === "plus");
+function PremiumProfileHeader({ user, rawUser, draft, accent, isPlus, bannerStyle, onFieldChange }) {
   const role = user.role === "owner" ? "مالك" : user.role === "admin" ? "منظم" : "لاعب";
   const roleBadgeClass = user.role === "owner"
     ? "text-royalGold-300 border-royalGold-400/40 bg-royalGold-500/10"
@@ -346,11 +389,42 @@ function PremiumProfileHeader({ user, accent, bannerStyle }) {
       ? "text-gray-200 border-gray-300/30 bg-gray-300/10"
       : "text-white/80 border-white/20 bg-black/25";
   const initial = (user.username?.[0] || "?").toUpperCase();
+  const avatarInputRef = useRef(null);
+  const bannerInputRef = useRef(null);
+  const [editingAct, setEditingAct] = useState(false);
+
+  const pickVisual = (kind) => {
+    if (!isPlus) {
+      toast.error("التخصيص البصري متاح لمشتركي Personal Plus فقط");
+      return;
+    }
+    if (kind === "avatar") avatarInputRef.current?.click();
+    else bannerInputRef.current?.click();
+  };
+
+  const onPickImage = async (file, type) => {
+    if (!file) return;
+    const max = type === "avatar" ? 2_000_000 : 3_000_000;
+    if (file.size > max) {
+      toast.error(type === "avatar" ? "الأفاتار كبير (الحد 2MB)" : "البانر كبير (الحد 3MB)");
+      return;
+    }
+    const dataUrl = await fileToDataUrl(file);
+    onFieldChange(type, dataUrl);
+  };
 
   return (
     <div data-testid="premium-profile" className="rounded-2xl overflow-hidden border b-soft bg-surface">
-      <div data-testid="profile-banner" className="h-48 md:h-56 w-full relative" style={bannerStyle}>
+      <div data-testid="profile-banner" className="h-48 md:h-56 w-full relative group/banner cursor-pointer" style={bannerStyle} onClick={() => pickVisual("banner")}>
         <div className="absolute inset-0 bg-gradient-to-t from-background via-background/40 to-transparent" />
+        <MediaEditOverlay label="تعديل البنر" />
+        <input
+          ref={bannerInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => onPickImage(e.target.files?.[0], "banner")}
+        />
         <div className="absolute bottom-3 left-3 flex items-center gap-2 flex-wrap">
           <span className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-widest backdrop-blur px-2.5 py-1 rounded-full border ${roleBadgeClass}`}>
             <Shield size={10} /> {role}
@@ -366,28 +440,69 @@ function PremiumProfileHeader({ user, accent, bannerStyle }) {
       <div className="px-6 md:px-8 pb-6 -mt-12 relative space-y-5">
         <div className="grid lg:grid-cols-[1fr_auto] gap-4 items-end">
           <div className="flex items-end gap-4 min-w-0">
-          <div
-            data-testid="profile-avatar"
-            className="h-24 w-24 md:h-28 md:w-28 rounded-full border-4 border-background grid place-items-center overflow-hidden text-3xl font-display font-black"
-            style={{
-              backgroundColor: isPlus && user.avatar ? "transparent" : `${accent}22`,
-              color: accent,
-              boxShadow: `0 0 0 2px ${accent}55`,
-            }}
-          >
-            {isPlus && user.avatar ? (
-              <img src={user.avatar} alt={user.username} className="h-full w-full object-cover" />
-            ) : initial}
-          </div>
+            <div
+              data-testid="profile-avatar"
+              onClick={() => pickVisual("avatar")}
+              className="h-24 w-24 md:h-28 md:w-28 rounded-full border-4 border-background grid place-items-center overflow-hidden text-3xl font-display font-black relative group/avatar cursor-pointer"
+              style={{
+                backgroundColor: isPlus && user.avatar ? "transparent" : `${accent}22`,
+                color: accent,
+                boxShadow: `0 0 0 2px ${accent}55`,
+              }}
+            >
+              {isPlus && user.avatar ? (
+                <img src={user.avatar} alt={user.username} className="h-full w-full object-cover" />
+              ) : initial}
+              <MediaEditOverlay avatar />
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => onPickImage(e.target.files?.[0], "avatar")}
+              />
+            </div>
             <div className="flex-1 min-w-0">
-            {user.act ? (
-              <h1 data-testid="profile-act-display" className="font-display font-black text-3xl md:text-4xl truncate" style={{ color: accent }}>
-                {user.act}
-              </h1>
-            ) : (
-              <h1 className="font-display font-black text-3xl md:text-4xl truncate text-white/70">{user.username}</h1>
-            )}
+              {!editingAct ? (
+                <div className="flex items-center gap-2">
+                  {user.act ? (
+                    <h1 data-testid="profile-act-display" className="font-display font-black text-2xl sm:text-3xl md:text-4xl leading-tight break-all whitespace-normal" style={{ color: accent }}>
+                      {user.act}
+                    </h1>
+                  ) : (
+                    <h1 className="font-display font-black text-2xl sm:text-3xl md:text-4xl leading-tight break-all whitespace-normal text-white/70">{user.username}</h1>
+                  )}
+                  <button
+                    type="button"
+                    disabled={!!formatActCooldown(rawUser?.act_changed_at)}
+                    onClick={() => setEditingAct(true)}
+                    className="p-1.5 rounded-md border border-white/20 text-white/75 hover:bg-white/10 disabled:opacity-45"
+                  >
+                    <Pencil size={13} />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 max-w-md">
+                  <input
+                    data-testid="profile-act-input"
+                    value={draft?.act || ""}
+                    onChange={(e) => onFieldChange("act", e.target.value)}
+                    minLength={2}
+                    maxLength={40}
+                    placeholder="YourName#1234"
+                    className="flex-1 bg-background border b-soft rounded-md px-3 py-2 outline-none focus:border-gold-500/40 text-sm"
+                  />
+                  <button type="button" onClick={() => setEditingAct(false)} className="px-2.5 py-2 rounded-md border border-white/20 text-white/80 hover:bg-white/10 text-xs">
+                    تم
+                  </button>
+                </div>
+              )}
               <div className="text-white/50 text-sm mt-1 truncate">@{user.username} • {user.email}</div>
+              {formatActCooldown(rawUser?.act_changed_at) ? (
+                <div data-testid="act-cooldown-msg" className="text-[11px] text-destructive mt-1 inline-flex items-center gap-1">
+                  <Lock size={12} /> لا يمكنك تعديل حساب اللعب الآن. المتبقي: {formatActCooldown(rawUser?.act_changed_at)}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -403,23 +518,62 @@ function PremiumProfileHeader({ user, accent, bannerStyle }) {
           <div>
             <div className="text-[10px] uppercase tracking-widest text-white/40 mb-2">الإنجازات</div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2" data-testid="profile-achievements">
-            <AchievementBadge icon={<Check size={14} />} label="عدد مرات التحضير" value={user.attendances || 0} accent={accent} tone="silver" />
-            <AchievementBadge icon={<Trophy size={14} />} label="نجم المباراة" value={user.mvp_count || 0} accent={accent} tone="gold" />
-            <AchievementBadge icon={<Swords size={14} />} label="Wins" value={user.wins || 0} accent={accent} tone="bronze" />
-            <AchievementBadge icon={<Flame size={14} />} label="Losses" value={user.losses || 0} accent={accent} tone="danger" />
+              <AchievementBadge icon={<Check size={14} />} label="عدد مرات التحضير" value={user.attendances || 0} accent={accent} tone="silver" />
+              <AchievementBadge icon={<Trophy size={14} />} label="نجم المباراة" value={user.mvp_count || 0} accent={accent} tone="gold" />
+              <AchievementBadge icon={<Swords size={14} />} label="Wins" value={user.wins || 0} accent={accent} tone="bronze" />
+              <AchievementBadge icon={<Flame size={14} />} label="Losses" value={user.losses || 0} accent={accent} tone="danger" />
             </div>
           </div>
 
           <div>
-            <div className="text-[10px] uppercase tracking-widest text-white/40 mb-2">القنوات والحسابات</div>
-            <div className="grid gap-2">
-            <SocialRow icon={<Twitch size={16} />} label="Twitch" url={user.twitch_url} accent={accent} testid="social-twitch" />
-            <SocialRow icon={<Tv size={16} />} label="Kick" url={user.kick_url} accent={accent} testid="social-kick" />
-            <SocialRow icon={<Tv size={16} />} label="TikTok" url={user.tiktok_url} accent={accent} testid="social-tiktok" />
-            </div>
+            <SingleColorPicker value={draft?.accent_color || "#FFCC00"} onChange={(v) => onFieldChange("accent_color", v)} disabled={!isPlus} />
+            <div className="text-[10px] uppercase tracking-widest text-white/40 mb-2 mt-3">القنوات والحسابات</div>
+            <SocialChannelsCard user={user} onFieldChange={onFieldChange} testidPrefix="social" />
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+const SOCIAL_PLATFORMS = [
+  { key: "discord_username", label: "Discord", testid: "social-discord", Icon: FaDiscord, color: "#5865F2", kind: "text", placeholder: "your_username" },
+  { key: "twitch_url", label: "Twitch", testid: "social-twitch", Icon: FaTwitch, color: "#a970ff" },
+  { key: "kick_url", label: "Kick", testid: "social-kick", Icon: SiKick, color: "#53fc18" },
+  { key: "youtube_url", label: "YouTube", testid: "social-youtube", Icon: FaYoutube, color: "#ff0000" },
+  { key: "tiktok_url", label: "TikTok", testid: "social-tiktok", Icon: FaTiktok, color: "#ffffff" },
+  { key: "instagram_link", label: "Instagram", testid: "social-instagram", Icon: FaInstagram, color: "#e1306c" },
+  { key: "x_link", label: "X", testid: "social-x", Icon: FaXTwitter, color: "#ffffff" },
+];
+
+function SocialChannelsCard({ user, onFieldChange, testidPrefix = "social" }) {
+  const [editingKey, setEditingKey] = useState("");
+
+  const startEdit = (key, initialValue) => {
+    setEditingKey(key);
+  };
+
+  const cancelEdit = () => {
+    setEditingKey("");
+  };
+
+  return (
+    <div className="grid gap-2">
+      {SOCIAL_PLATFORMS.map((p) => {
+        const url = user?.[p.key] || "";
+        return (
+          <SocialRow
+            key={p.key}
+            platform={{ ...p, testid: `${testidPrefix}-${p.label.toLowerCase()}` }}
+            url={url}
+            isEditing={editingKey === p.key}
+            onDraftChange={(v) => onFieldChange?.(p.key, v)}
+            onEdit={() => startEdit(p.key, url)}
+            onCancel={cancelEdit}
+            onSave={() => setEditingKey("")}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -459,27 +613,82 @@ function Stat({ label, value, accent, testid }) {
   );
 }
 
-function SocialRow({ icon, label, url, accent, testid }) {
-  if (!url) {
+function SocialRow({ platform, url, isEditing = false, onDraftChange, onEdit, onCancel, onSave }) {
+  const { Icon, label, color, testid, kind = "url", placeholder = "" } = platform;
+  const iconNode = <Icon size={16} color={color} />;
+  const normalizedValue = kind === "text" ? String(url || "").replace(/^@+/, "") : url;
+
+  if (isEditing) {
     return (
-      <div className="w-full flex items-center gap-3 bg-background/40 border b-soft rounded-lg px-3 py-3 text-sm text-white/40" data-testid={testid}>
-        <span style={{ color: accent }}>{icon}</span>
+      <div className="w-full flex items-center gap-3 bg-[#111113] border border-gray-800 rounded-lg px-3 py-2.5 text-sm" data-testid={`${testid}-edit`}>
+        <span>{iconNode}</span>
         <span className="font-bold w-16 shrink-0">{label}</span>
-        <span className="text-xs">— لا يوجد رابط —</span>
+        <input
+          value={normalizedValue}
+          onChange={(e) => onDraftChange?.(e.target.value)}
+          placeholder={kind === "text" ? placeholder : `https://${label.toLowerCase()}.com/username`}
+          className="flex-1 bg-black/35 border border-gray-700 rounded-md px-2.5 py-1.5 outline-none focus:border-royalGold-400 text-white/85"
+        />
+        <button
+          type="button"
+          onClick={onSave}
+          className="px-2.5 py-1.5 rounded-md bg-emerald-500 text-black font-bold hover:bg-emerald-400 disabled:opacity-50"
+        >
+          تم
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-2.5 py-1.5 rounded-md border border-gray-700 text-white/75 hover:bg-white/5 disabled:opacity-50"
+        >
+          إلغاء
+        </button>
       </div>
     );
   }
+
+  if (!url) {
+    return (
+      <div className="w-full flex items-center gap-3 bg-[#111113] border border-gray-900 rounded-lg px-3 py-3 text-sm text-white/40" data-testid={testid}>
+        <span>{iconNode}</span>
+        <span className="font-bold w-16 shrink-0">{label}</span>
+        <span className="text-xs flex-1">{kind === "text" ? "— غير محدد —" : "— لا يوجد رابط —"}</span>
+        <button type="button" onClick={onEdit} className="p-1.5 rounded-md border border-gray-800 text-white/65 hover:bg-white/5 hover:text-white">
+          <Pencil size={13} />
+        </button>
+      </div>
+    );
+  }
+
+  if (kind === "text") {
+    return (
+      <div data-testid={testid} className="w-full flex items-center gap-3 bg-[#111113] border border-gray-900 rounded-lg px-3 py-3 text-sm hover:border-gray-700 hover:bg-[#18181b] transition">
+        <span>{iconNode}</span>
+        <span className="font-bold w-16 shrink-0">{label}</span>
+        <span className="text-white/80 truncate flex-1" dir="ltr">@{normalizedValue}</span>
+        <button type="button" onClick={onEdit} className="p-1.5 rounded-md border border-gray-800 text-white/65 hover:bg-white/5 hover:text-white">
+          <Pencil size={13} />
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <a href={url} target="_blank" rel="noreferrer" data-testid={testid} className="w-full flex items-center gap-3 bg-background/40 border b-soft rounded-lg px-3 py-3 text-sm hover:border-royalGold-500/40 hover:bg-royalGold-500/5 transition">
-      <span style={{ color: accent }}>{icon}</span>
+    <div data-testid={testid} className="w-full flex items-center gap-3 bg-[#111113] border border-gray-900 rounded-lg px-3 py-3 text-sm hover:border-gray-700 hover:bg-[#18181b] transition">
+      <span>{iconNode}</span>
       <span className="font-bold w-16 shrink-0">{label}</span>
-      <span className="text-white/70 truncate flex-1">{url}</span>
-      <span className="text-royalGold-400 text-xs">فتح</span>
-    </a>
+      {url ? (
+        <a href={url} target="_blank" rel="noreferrer" className="text-white/70 truncate flex-1 hover:text-white">{url}</a>
+      ) : (
+        <span className="text-white/70 truncate flex-1">— لا يوجد رابط —</span>
+      )}
+      <button type="button" onClick={onEdit} className="p-1.5 rounded-md border border-gray-800 text-white/65 hover:bg-white/5 hover:text-white">
+        <Pencil size={13} />
+      </button>
+    </div>
   );
 }
 
-// --------------- Personal Plus customizer ----------------
 async function fileToDataUrl(file) {
   return new Promise((res, rej) => {
     const fr = new FileReader();
@@ -489,71 +698,58 @@ async function fileToDataUrl(file) {
   });
 }
 
-function PersonalPlusCustomizer({ user }) {
-  const [avatar, setAvatar] = useState(user.avatar || "");
-  const [banner, setBanner] = useState(user.banner || "");
-  const [accent, setAccent] = useState(user.accent_color || "#FFCC00");
-  const [busy, setBusy] = useState(false);
-
-  const onPickAvatar = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    if (f.size > 2_000_000) return toast.error("الأفاتار كبير (الحد 2MB)");
-    setAvatar(await fileToDataUrl(f));
-  };
-  const onPickBanner = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    if (f.size > 3_000_000) return toast.error("البانر كبير (الحد 3MB)");
-    setBanner(await fileToDataUrl(f));
-  };
-  const save = async () => {
-    setBusy(true);
-    try {
-      await api.put("/me/profile", { avatar, banner, accent_color: accent });
-      toast.success("تم حفظ التخصيصات");
-      window.location.reload();
-    } catch (err) {
-      toast.error(formatApiErrorDetail(err.response?.data?.detail));
-    } finally {
-      setBusy(false);
-    }
-  };
-
+function MediaEditOverlay({ label = "تعديل", avatar = false }) {
   return (
-    <section data-testid="plus-customizer" className="bg-gold-500/5 border border-gold-500/30 rounded-xl p-6">
-      <h2 className="font-display font-black text-xl mb-3 flex items-center gap-2">
-        <Sparkles className="text-gold-500" /> تخصيص Personal Plus
-      </h2>
-      <p className="text-xs text-white/60 mb-4">رفع صورة شخصية، بانر خلفية، واختيار لون مميز يظهر في ملفك الشخصي.</p>
-      <div className="grid sm:grid-cols-3 gap-3">
-        <label className="cursor-pointer bg-background border b-soft rounded-md p-3 flex flex-col items-center gap-2 text-xs text-center hover:border-gold-500/40">
-          <ImageIcon size={20} className="text-gold-500" />
-          <span>أفاتار (≤2MB)</span>
-          <input data-testid="upload-avatar" type="file" accept="image/*" onChange={onPickAvatar} className="hidden" />
-          {avatar && <span className="text-[10px] text-emerald-400">✓ صورة محملة</span>}
-        </label>
-        <label className="cursor-pointer bg-background border b-soft rounded-md p-3 flex flex-col items-center gap-2 text-xs text-center hover:border-gold-500/40">
-          <ImageIcon size={20} className="text-gold-500" />
-          <span>بانر (≤3MB)</span>
-          <input data-testid="upload-banner" type="file" accept="image/*" onChange={onPickBanner} className="hidden" />
-          {banner && <span className="text-[10px] text-emerald-400">✓ بانر محمل</span>}
-        </label>
-        <label className="bg-background border b-soft rounded-md p-3 flex flex-col items-center gap-2 text-xs text-center">
-          <Palette size={20} className="text-gold-500" />
-          <span>لون مميز</span>
-          <input data-testid="accent-color" type="color" value={accent} onChange={(e) => setAccent(e.target.value)} className="h-8 w-20 cursor-pointer bg-transparent border-0" />
-          <span className="text-[10px] text-white/40 font-mono">{accent}</span>
-        </label>
+    <div className="absolute inset-0 grid place-items-center bg-black/40 backdrop-blur-[2px] opacity-100 md:opacity-0 md:group-hover/banner:opacity-100 md:group-hover/avatar:opacity-100 transition-opacity duration-200">
+      <span className={`inline-flex items-center gap-1.5 text-white ${avatar ? "text-sm" : "text-xs"} px-3 py-1.5 rounded-full border border-white/20 bg-black/35`}>
+        <FaPenToSquare size={14} /> {label}
+      </span>
+    </div>
+  );
+}
+
+function SingleColorPicker({ value, onChange, disabled = false }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-black/25 p-3" data-testid="single-color-editor">
+      <div className="text-[10px] uppercase tracking-widest text-white/45 mb-2">لون الملف</div>
+      <div className="flex items-center gap-3">
+        <div className="h-12 w-12 rounded-lg border border-white/20" style={{ background: value }} />
+        <input
+          data-testid="profile-color-input"
+          type="color"
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange?.(e.target.value)}
+          className="h-12 w-20 cursor-pointer bg-transparent border-0 disabled:opacity-45"
+        />
+        <div className="text-xs text-white/75 font-mono">{value}</div>
       </div>
-      <button
-        data-testid="save-plus-customizer"
-        onClick={save}
-        disabled={busy}
-        className="mt-4 px-4 py-2 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 disabled:opacity-50 flex items-center gap-2"
-      >
-        <Save size={14} /> {busy ? "..." : "حفظ التخصيصات"}
-      </button>
-    </section>
+      {!disabled ? null : <div className="text-[10px] text-white/45 mt-2">تغيير اللون متاح لمشتركي Personal Plus فقط.</div>}
+    </div>
+  );
+}
+
+function ProfileDraftActionBar({ visible, saving, onSave, onDiscard }) {
+  return (
+    <div className={`fixed bottom-4 left-1/2 -translate-x-1/2 z-[999] transition-all duration-200 ${visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8 pointer-events-none"}`}>
+      <div className="rounded-2xl border border-white/15 bg-[#111113]/95 backdrop-blur-md px-4 py-3 shadow-[0_14px_35px_rgba(0,0,0,0.45)] flex items-center gap-2.5">
+        <button
+          type="button"
+          disabled={saving}
+          onClick={onSave}
+          className="px-4 py-2 rounded-lg bg-emerald-500 text-black font-black hover:bg-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.45)] disabled:opacity-50"
+        >
+          {saving ? "..." : "حفظ التغييرات"}
+        </button>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={onDiscard}
+          className="px-4 py-2 rounded-lg bg-gray-700 text-white font-semibold hover:bg-gray-600 disabled:opacity-50"
+        >
+          تجاهل
+        </button>
+      </div>
+    </div>
   );
 }

@@ -20,6 +20,7 @@ import LeaguesPage from "./pages/LeaguesPage";
 import LeagueDetailPage from "./pages/LeagueDetailPage";
 import ChampionsFactoryPage from "./pages/ChampionsFactoryPage";
 import NewsTransfersPage from "./pages/NewsTransfersPage";
+import OnboardingTour from "./components/OnboardingTour";
 import { Toaster } from "sonner";
 
 function Protected({ children }) {
@@ -74,6 +75,7 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <AppRoutes />
+        <OnboardingTour />
         <Toaster position="top-center" theme="dark" richColors />
       </BrowserRouter>
     </AuthProvider>

@@ -5,6 +5,8 @@ import uuid
 import time
 import requests
 
+from _auth_test_utils import create_user_and_token, ensure_admin_token
+
 BASE_URL = (
     os.environ.get("TEST_BASE_URL")
     or os.environ.get("REACT_APP_BACKEND_URL")
@@ -18,22 +20,19 @@ TINY_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAA
 
 
 def _login_admin():
-    r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
-    assert r.status_code == 200, r.text
-    return r.json()["token"]
+    _user, token = ensure_admin_token(ADMIN_EMAIL)
+    return token
 
 
 def _register():
     suffix = uuid.uuid4().hex[:6]
-    r = requests.post(f"{API}/auth/register", json={
-        "email": f"ls_{suffix}@example.com",
-        "username": f"ls_{suffix}",
-        "password": "Pass@1234",
-        "act": f"ACT_{suffix}",
-        "accepted_terms": True,
-    })
-    assert r.status_code == 200, r.text
-    return r.json()["user"], r.json()["token"]
+    user, token = create_user_and_token(
+        role="player",
+        email=f"ls_{suffix}@example.com",
+        username=f"ls_{suffix}",
+        act=f"ACT_{suffix}",
+    )
+    return user, token
 
 
 def _make_clan(token, prefix):

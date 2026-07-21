@@ -16,7 +16,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
 
 ROOT_DIR = Path(__file__).resolve().parent
-load_dotenv(ROOT_DIR.parent / ".env", override=False)
+# Force backend/.env values to override stale PM2 env values (e.g. channel IDs)
+load_dotenv(ROOT_DIR.parent / ".env", override=True)
 load_dotenv(ROOT_DIR.parent.parent / ".env", override=False)
 
 logging.basicConfig(level=logging.INFO)
@@ -33,6 +34,36 @@ def _env_int(name: str, default: int = 0) -> int:
         logger.warning("Invalid integer env %s=%r; using default=%s", name, raw, default)
         return default
 
+
+def _env_json_object(name: str, default: Optional[dict] = None) -> dict:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default or {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    logger.warning("Invalid JSON env %s; using default object", name)
+    return default or {}
+
+
+def _env_int_set(name: str, default: Optional[set[int]] = None) -> set[int]:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return set(default or set())
+    out: set[int] = set()
+    for p in raw.split(","):
+        part = (p or "").strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except Exception:
+            logger.warning("Invalid %s role id value: %r", name, part)
+    return out or set(default or set())
+
 MONGO_URI = os.environ.get("MONGO_URI") or os.environ.get("MONGO_URL") or "mongodb://localhost:27017"
 DB_NAME = os.environ.get("DB_NAME", "rivals")
 DISCORD_BOT_TOKEN = (os.environ.get("DISCORD_BOT_TOKEN") or "").strip()
@@ -42,6 +73,8 @@ SUPPORT_ROLE_ID = _env_int("DISCORD_SUPPORT_ROLE_ID", 0)
 PLUS_ROLE_ID = _env_int("DISCORD_PLUS_ROLE_ID", _env_int("DISCORD_RIVALS_PLUS_ROLE_ID", 0))
 NEWS_CHANNEL_ID = _env_int("DISCORD_NEWS_CHANNEL_ID", 1522275731982520391)
 RANK_CHANNEL_ID = _env_int("DISCORD_RANK_CHANNEL_ID", 1472192794192777330)
+LEVEL_UP_CHANNEL_ID = _env_int("LEVEL_UP_CHANNEL_ID", 0)
+NEWS_BACKLOG_HOURS = _env_int("DISCORD_NEWS_BACKLOG_HOURS", 168)
 TICKET_CATEGORY_ID = _env_int("DISCORD_TICKET_CATEGORY_ID", 0)
 TICKET_PANEL_BANNER_GIF_URL = (
     os.environ.get("DISCORD_TICKET_PANEL_BANNER_GIF_URL")
@@ -50,16 +83,34 @@ TICKET_PANEL_BANNER_GIF_URL = (
 TICKET_WELCOME_BANNER_URL = (
     "https://cdn.discordapp.com/attachments/1506099199937351812/1522391148822266087/07AD0530-2F43-4ACD-B85D-68A655F2FE3B.png?ex=6a484cbe&is=6a46fb3e&hm=4e3985cbb83944e2880728a0c9f6b684beea396a2f8ac5d4efd8da903391cba0&"
 )
+WELCOME_BANNER_URL = (
+    os.environ.get("DISCORD_WELCOME_BANNER_URL")
+    or TICKET_WELCOME_BANNER_URL
+).strip()
+WELCOME_WEBSITE_URL = (os.environ.get("DISCORD_WELCOME_WEBSITE_URL") or "https://rivalsesports.games").strip()
+WELCOME_RULES_URL = (os.environ.get("DISCORD_WELCOME_RULES_URL") or "https://rivalsesports.games/rules").strip()
 XP_COOLDOWN_SECONDS = _env_int("DISCORD_XP_COOLDOWN_SECONDS", 60)
 JOB_POLL_SECONDS = float((os.environ.get("DISCORD_JOB_POLL_SECONDS") or "2").strip() or 2)
 
 # JSON example: {"5": 1234567890, "10": 1234567891}
-LEVEL_ROLE_MAP = json.loads(os.environ.get("DISCORD_LEVEL_ROLE_MAP", "{}"))
-STAFF_ROLE_IDS = {1366698520039526461, 1366698554822754394}
+LEVEL_ROLE_MAP = _env_json_object("DISCORD_LEVEL_ROLE_MAP", {})
+STAFF_ROLE_IDS = _env_int_set(
+    "DISCORD_STAFF_ROLE_IDS",
+    {1366698520039526461, 1366698554822754394},
+)
+VIP_GOLD_ROLE_IDS = _env_int_set("DISCORD_VIP_GOLD_ROLE_IDS", set())
+VIP_DIAMOND_ROLE_IDS = _env_int_set("DISCORD_VIP_DIAMOND_ROLE_IDS", set())
+VIP_GOLD_XP_MULTIPLIER = 1.5
+VIP_DIAMOND_XP_MULTIPLIER = 2.0
 
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _is_http_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return u.startswith("http://") or u.startswith("https://")
 
 
 def iso(dt: datetime) -> str:
@@ -69,6 +120,13 @@ def iso(dt: datetime) -> str:
 def calc_level(xp: int) -> int:
     # Cheap deterministic curve
     return int((max(0, xp) // 100) ** 0.5)
+
+
+def normalize_discord_username(raw: str) -> str:
+    value = (raw or "").strip().lower()
+    if value.startswith("@"):
+        value = value[1:]
+    return value
 
 
 def has_staff_access(member: discord.Member) -> bool:
@@ -99,7 +157,10 @@ class RivalsBot(commands.Bot):
 
         self._xp_cooldowns = {}
         self._discord_call_gate = asyncio.Semaphore(2)
-        self._news_min_created_at = iso(now_utc())
+        if NEWS_BACKLOG_HOURS > 0:
+            self._news_min_created_at = iso(now_utc() - timedelta(hours=NEWS_BACKLOG_HOURS))
+        else:
+            self._news_min_created_at = "1970-01-01T00:00:00+00:00"
 
     async def setup_hook(self):
         if DISCORD_GUILD_ID <= 0:
@@ -120,15 +181,22 @@ class RivalsBot(commands.Bot):
         await self._sync_app_commands()
 
     async def _sync_app_commands(self):
-        """Best-effort command sync with detailed logs."""
+        """Best-effort command sync with duplicate-safe strategy (guild only)."""
         total_synced = 0
-        try:
-            synced = await asyncio.wait_for(self.tree.sync(), timeout=20)
-            total_synced += len(synced)
-            logger.info("Global command sync complete: %s commands", len(synced))
-        except Exception as exc:
-            logger.warning("Global command sync failed: %s", exc)
 
+        # 1) Purge old global commands so they don't duplicate guild-scoped ones in slash UI.
+        try:
+            app_id = int(self.application_id) if self.application_id else None
+            if not app_id:
+                app_info = await asyncio.wait_for(self.application_info(), timeout=20)
+                app_id = int(app_info.id)
+            if app_id:
+                await asyncio.wait_for(self.http.bulk_upsert_global_commands(app_id, []), timeout=20)
+                logger.info("Global commands cleared to prevent slash duplication")
+        except Exception as exc:
+            logger.warning("Global command clear failed: %s", exc)
+
+        # 2) Sync commands only for the configured guild.
         if DISCORD_GUILD_ID > 0:
             try:
                 guild_obj = discord.Object(id=DISCORD_GUILD_ID)
@@ -136,12 +204,14 @@ class RivalsBot(commands.Bot):
                 synced_guild = await asyncio.wait_for(self.tree.sync(guild=guild_obj), timeout=20)
                 total_synced += len(synced_guild)
                 logger.info(
-                    "Guild command sync complete (%s): %s commands",
+                    "Guild-only command sync complete (%s): %s commands",
                     DISCORD_GUILD_ID,
                     len(synced_guild),
                 )
             except Exception as exc:
                 logger.warning("Guild command sync failed (%s): %s", DISCORD_GUILD_ID, exc)
+        else:
+            logger.warning("DISCORD_GUILD_ID missing: guild-only command sync skipped")
 
         logger.info("Command sync finished. Total synced entries: %s", total_synced)
 
@@ -161,8 +231,25 @@ class RivalsBot(commands.Bot):
             ])
             await self.db.discord_levels.create_index([("guild_id", 1), ("user_id", 1)], unique=True)
             await self.db.discord_level_roles.create_index([("guild_id", 1), ("level", 1)], unique=True)
+            await self.db.discord_bot_settings.create_index([("guild_id", 1)], unique=True)
+            await self.db.discord_jobs.create_index("id", unique=True)
+            await self.db.discord_jobs.create_index(
+                [("status", 1), ("next_retry_at", 1), ("priority", 1), ("created_at", 1)]
+            )
         except Exception as exc:
             logger.warning("Ticket indexes init failed: %s", exc)
+
+    async def close(self):
+        try:
+            if self.poll_jobs.is_running():
+                self.poll_jobs.cancel()
+        except Exception:
+            pass
+        try:
+            self.mongo.close()
+        except Exception:
+            pass
+        await super().close()
 
     async def _resolve_level_role_id(self, guild_id: int, level: int) -> Optional[int]:
         try:
@@ -187,12 +274,34 @@ class RivalsBot(commands.Bot):
         role = member.guild.get_role(rid)
         if not role:
             return False
-        if role in member.roles:
-            return False
+
+        configured_ids = set()
+        try:
+            cfg_docs = await self.db.discord_level_roles.find(
+                {"guild_id": member.guild.id},
+                {"_id": 0, "role_id": 1},
+            ).to_list(500)
+            for d in cfg_docs:
+                rv = d.get("role_id")
+                if str(rv or "").isdigit():
+                    configured_ids.add(int(rv))
+        except Exception:
+            pass
+        for rv in LEVEL_ROLE_MAP.values():
+            if str(rv or "").isdigit():
+                configured_ids.add(int(rv))
+
+        to_remove = [r for r in member.roles if r.id in configured_ids and r.id != rid]
+        changed = False
         try:
             async with self._discord_call_gate:
-                await member.add_roles(role, reason=f"RIVALS leveling L{level}")
-            return True
+                if to_remove:
+                    await member.remove_roles(*to_remove, reason=f"RIVALS leveling swap L{level}")
+                    changed = True
+                if role not in member.roles:
+                    await member.add_roles(role, reason=f"RIVALS leveling L{level}")
+                    changed = True
+            return changed
         except Exception:
             return False
 
@@ -228,6 +337,104 @@ class RivalsBot(commands.Bot):
             "role_granted": role_granted,
         }
 
+    def _vip_xp_multiplier_for_member(self, member: discord.Member) -> float:
+        role_ids = {r.id for r in member.roles}
+        if VIP_DIAMOND_ROLE_IDS and any(rid in role_ids for rid in VIP_DIAMOND_ROLE_IDS):
+            return VIP_DIAMOND_XP_MULTIPLIER
+        if VIP_GOLD_ROLE_IDS and any(rid in role_ids for rid in VIP_GOLD_ROLE_IDS):
+            return VIP_GOLD_XP_MULTIPLIER
+
+        role_names = {normalize_discord_username(r.name) for r in member.roles}
+        if any("diamond" in rn or "دايموند" in rn for rn in role_names):
+            return VIP_DIAMOND_XP_MULTIPLIER
+        if any("gold" in rn or "جولد" in rn for rn in role_names):
+            return VIP_GOLD_XP_MULTIPLIER
+        return 1.0
+
+    def _build_rank_embed(self, member: discord.Member, xp: int, level: int, gained: int = 0, multiplier: float = 1.0) -> discord.Embed:
+        embed = discord.Embed(
+            title="🎯 RIVALS Tactical Rank",
+            description=f"{member.mention} استمر، ما باقي لك شيء.",
+            color=discord.Color.blurple(),
+            timestamp=now_utc(),
+        )
+        embed.add_field(name="Level", value=f"**{int(level)}**", inline=True)
+        embed.add_field(name="XP", value=f"**{int(xp)}**", inline=True)
+        embed.add_field(name="XP Gained", value=f"+{int(gained)}", inline=True)
+        if multiplier > 1.0:
+            embed.add_field(name="VIP Boost", value=f"x{multiplier:.1f}", inline=True)
+        try:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        except Exception:
+            pass
+        embed.set_footer(text="RIVALS XP System")
+        return embed
+
+    def _build_level_up_announcement_embed(
+        self,
+        member: discord.Member,
+        new_level: int,
+        role_name: str = "",
+        multiplier: float = 1.0,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="🚀 LEVEL UP • RIVALS",
+            description=f"{member.mention} دخل مستوى جديد! استمر، السيطرة جاية 🔥",
+            color=discord.Color.gold(),
+            timestamp=now_utc(),
+        )
+        embed.add_field(name="المستوى الجديد", value=f"**L{int(new_level)}**", inline=True)
+        embed.add_field(name="الرتبة الجديدة", value=role_name or "—", inline=True)
+        if multiplier > 1.0:
+            embed.add_field(name="VIP Boost", value=f"x{multiplier:.1f}", inline=True)
+        else:
+            embed.add_field(name="VIP Boost", value="x1.0", inline=True)
+        embed.set_footer(text="RIVALS Esports • Keep Grinding")
+        try:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        except Exception:
+            pass
+        return embed
+
+    async def _resolve_level_up_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
+        # Priority 1: per-guild runtime setting via !set_level_channel
+        try:
+            cfg = await self.db.discord_bot_settings.find_one(
+                {"guild_id": guild.id},
+                {"_id": 0, "level_up_channel_id": 1},
+            )
+            cfg_id = int((cfg or {}).get("level_up_channel_id") or 0)
+            if cfg_id > 0:
+                ch = guild.get_channel(cfg_id)
+                if isinstance(ch, discord.TextChannel):
+                    return ch
+        except Exception:
+            pass
+
+        # Priority 2: env LEVEL_UP_CHANNEL_ID
+        if LEVEL_UP_CHANNEL_ID > 0:
+            ch = guild.get_channel(LEVEL_UP_CHANNEL_ID)
+            if isinstance(ch, discord.TextChannel):
+                return ch
+
+        # Priority 3: legacy rank channel
+        if RANK_CHANNEL_ID > 0:
+            ch = guild.get_channel(RANK_CHANNEL_ID)
+            if isinstance(ch, discord.TextChannel):
+                return ch
+
+        # Priority 4: system channel then first writable text channel
+        if isinstance(guild.system_channel, discord.TextChannel):
+            return guild.system_channel
+        me = guild.me
+        for ch in guild.text_channels:
+            if not me:
+                return ch
+            perms = ch.permissions_for(me)
+            if perms.view_channel and perms.send_messages:
+                return ch
+        return None
+
     async def _guild(self) -> Optional[discord.Guild]:
         if DISCORD_GUILD_ID <= 0:
             return None
@@ -252,6 +459,41 @@ class RivalsBot(commands.Bot):
                 return await guild.fetch_member(uid)
         except Exception:
             return None
+
+    async def _resolve_member_by_discord_username(self, guild: discord.Guild, discord_username: str) -> Optional[discord.Member]:
+        target = normalize_discord_username(discord_username)
+        if not target:
+            return None
+
+        def _matches(member: discord.Member) -> bool:
+            if normalize_discord_username(member.name) == target:
+                return True
+            if normalize_discord_username(getattr(member, "global_name", "") or "") == target:
+                return True
+            return normalize_discord_username(member.display_name) == target
+
+        for m in guild.members:
+            if _matches(m):
+                return m
+
+        try:
+            async with self._discord_call_gate:
+                async for m in guild.fetch_members(limit=None):
+                    if _matches(m):
+                        return m
+        except Exception:
+            return None
+        return None
+
+    async def _resolve_member_from_user_doc(self, guild: discord.Guild, user_doc: dict) -> Optional[discord.Member]:
+        if not user_doc:
+            return None
+        did = str(user_doc.get("discord_id") or "").strip()
+        if did.isdigit():
+            member = await self._resolve_member(guild, did)
+            if member:
+                return member
+        return await self._resolve_member_by_discord_username(guild, str(user_doc.get("discord_username") or ""))
 
     async def _get_or_create_clan_role(self, guild: discord.Guild, clan_id: str, clan_name: str, clan_tag: str = "") -> Optional[discord.Role]:
         if not clan_id:
@@ -307,11 +549,14 @@ class RivalsBot(commands.Bot):
         old_clan_id = (payload.get("old_clan_id") or "").strip()
         new_clan_id = (payload.get("new_clan_id") or "").strip()
 
-        u = await self.db.users.find_one({"id": user_id}, {"_id": 0, "discord_id": 1})
-        if not u or not u.get("discord_id"):
+        u = await self.db.users.find_one(
+            {"id": user_id},
+            {"_id": 0, "discord_id": 1, "discord_username": 1},
+        )
+        if not u:
             return
 
-        member = await self._resolve_member(guild, str(u["discord_id"]))
+        member = await self._resolve_member_from_user_doc(guild, u)
         if not member:
             return
 
@@ -428,8 +673,31 @@ class RivalsBot(commands.Bot):
     async def sync_member_from_site(self, member: discord.Member) -> dict:
         user_doc = await self.db.users.find_one(
             {"discord_id": str(member.id)},
-            {"_id": 0, "id": 1, "clan_id": 1, "is_plus": 1, "plus_expires_at": 1, "personal_plus_until": 1},
+            {
+                "_id": 0,
+                "id": 1,
+                "clan_id": 1,
+                "is_plus": 1,
+                "plus_expires_at": 1,
+                "personal_plus_until": 1,
+                "discord_username": 1,
+            },
         )
+        if not user_doc:
+            uname = normalize_discord_username(member.name)
+            if uname:
+                user_doc = await self.db.users.find_one(
+                    {"discord_username": {"$regex": f"^{re.escape(uname)}$", "$options": "i"}},
+                    {
+                        "_id": 0,
+                        "id": 1,
+                        "clan_id": 1,
+                        "is_plus": 1,
+                        "plus_expires_at": 1,
+                        "personal_plus_until": 1,
+                        "discord_username": 1,
+                    },
+                )
         if not user_doc:
             return {"linked": False, "plus_changed": False, "clan_changed": False}
 
@@ -454,65 +722,7 @@ class RivalsBot(commands.Bot):
         }
 
     async def _process_plus_channels_create(self, payload: dict):
-        guild = await self._guild()
-        if not guild:
-            return
-
-        clan_id = payload.get("clan_id", "")
-        clan_name = payload.get("clan_name", "Clan")
-        clan_tag = payload.get("clan_tag", "")
-
-        role = await self._get_or_create_clan_role(guild, clan_id, clan_name, clan_tag)
-        if not role:
-            return
-
-        existing = await self.db.discord_plus_channels.find_one({"guild_id": guild.id, "clan_id": clan_id}, {"_id": 0})
-        if existing:
-            return
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(
-                view_channel=True,
-                connect=False,
-                speak=False,
-                send_messages=False,
-            ),
-            role: discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                speak=True,
-                send_messages=True,
-                read_message_history=True,
-                mute_members=True,
-                deafen_members=True,
-                move_members=True,
-            ),
-        }
-        if SUPPORT_ROLE_ID:
-            support_role = guild.get_role(SUPPORT_ROLE_ID)
-            if support_role:
-                overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, connect=True, speak=True)
-
-        try:
-            async with self._discord_call_gate:
-                category = await guild.create_category(name=f"Plus • {clan_name}", overwrites=overwrites, reason="RIVALS plus channels")
-                voice_ch = await guild.create_voice_channel(name=f"{clan_tag or clan_name} Voice"[:90], category=category)
-
-            await self.db.discord_plus_channels.update_one(
-                {"guild_id": guild.id, "clan_id": clan_id},
-                {
-                    "$set": {
-                        "category_id": category.id,
-                        "text_channel_id": None,
-                        "voice_channel_id": voice_ch.id,
-                        "clan_role_id": role.id,
-                        "updated_at": iso(now_utc()),
-                    }
-                },
-                upsert=True,
-            )
-        except Exception as exc:
-            logger.warning("Failed creating plus channels: %s", exc)
+        logger.info("Skipping plus channel creation job (role-only sync mode): %s", payload.get("clan_id", ""))
 
     async def _plus_room_doc_for_channel(self, guild_id: int, channel_id: int) -> Optional[dict]:
         return await self.db.discord_plus_channels.find_one(
@@ -657,6 +867,7 @@ class RivalsBot(commands.Bot):
     async def _news_channel(self) -> Optional[discord.TextChannel]:
         guild = await self._guild()
         if not guild or NEWS_CHANNEL_ID <= 0:
+            logger.warning("News channel unavailable: guild=%s NEWS_CHANNEL_ID=%s", bool(guild), NEWS_CHANNEL_ID)
             return None
         ch = guild.get_channel(NEWS_CHANNEL_ID)
         if isinstance(ch, discord.TextChannel):
@@ -667,6 +878,55 @@ class RivalsBot(commands.Bot):
             return fetched if isinstance(fetched, discord.TextChannel) else None
         except Exception:
             return None
+
+    async def _welcome_channel(self) -> Optional[discord.TextChannel]:
+        guild = await self._guild()
+        if not guild or WELCOME_CHANNEL_ID <= 0:
+            return None
+        ch = guild.get_channel(WELCOME_CHANNEL_ID)
+        if isinstance(ch, discord.TextChannel):
+            return ch
+        try:
+            async with self._discord_call_gate:
+                fetched = await guild.fetch_channel(WELCOME_CHANNEL_ID)
+            return fetched if isinstance(fetched, discord.TextChannel) else None
+        except Exception as exc:
+            logger.warning("Welcome channel guild-fetch failed (%s): %s", WELCOME_CHANNEL_ID, exc)
+
+        # Fallback: direct API fetch by channel id (helps when cache/guild lookup mismatches)
+        try:
+            async with self._discord_call_gate:
+                fetched_any = await self.fetch_channel(WELCOME_CHANNEL_ID)
+            return fetched_any if isinstance(fetched_any, discord.TextChannel) else None
+        except Exception as exc:
+            logger.warning("Welcome channel global-fetch failed (%s): %s", WELCOME_CHANNEL_ID, exc)
+            return None
+
+    def _build_welcome_embed(self, member: discord.Member) -> discord.Embed:
+        embed = discord.Embed(
+            title="🎉 عضو جديد وصل!",
+            description=(
+                f"هلا والله {member.mention}\n"
+                f"نورت سيرفر **RIVALS** يا **{member.display_name}** 🔥"
+            ),
+            color=discord.Color.from_rgb(88, 101, 242),
+            timestamp=now_utc(),
+        )
+        try:
+            avatar_url = member.display_avatar.url
+            embed.set_thumbnail(url=avatar_url)
+            embed.set_author(name=str(member), icon_url=avatar_url)
+        except Exception:
+            pass
+
+        if WELCOME_BANNER_URL:
+            embed.set_image(url=WELCOME_BANNER_URL)
+
+        embed.add_field(name="اسم العضو", value=member.display_name, inline=True)
+        embed.add_field(name="الرقم", value=f"#{member.discriminator}", inline=True)
+        embed.add_field(name="عدد الأعضاء", value=str(member.guild.member_count), inline=True)
+        embed.set_footer(text="RIVALS VIP Welcome • أهلاً وسهلاً")
+        return embed
 
     async def _clan_mention_or_name(self, guild: discord.Guild, clan: dict) -> str:
         if not clan:
@@ -740,9 +1000,32 @@ class RivalsBot(commands.Bot):
         embed.set_footer(text="RIVALS • Match Center")
         return embed
 
+    def _build_generic_news_embed(self, doc: dict) -> discord.Embed:
+        kind = (doc.get("kind") or "news").strip()
+        title = (doc.get("title") or "RIVALS News").strip()
+        body = (doc.get("body") or "").strip()
+        icon = "📰"
+        color = discord.Color.blue()
+        if kind == "hall-of-fame":
+            icon = "🏆"
+            color = discord.Color.gold()
+        elif kind in {"match-score", "match-start"}:
+            icon = "⚔️"
+            color = discord.Color.blurple()
+        elif kind == "transfer_market":
+            icon = "🔥"
+            color = discord.Color.orange()
+        embed = discord.Embed(
+            title=f"{icon} {title}",
+            description=body or "—",
+            color=color,
+            timestamp=now_utc(),
+        )
+        embed.set_footer(text=f"RIVALS • {kind}")
+        return embed
+
     async def _claim_pending_news_doc(self) -> Optional[dict]:
         q = {
-            "kind": {"$in": ["transfer_market", "match-start"]},
             "$or": [{"discord_status": {"$exists": False}}, {"discord_status": "queued"}],
             "created_at": {"$gte": self._news_min_created_at},
         }
@@ -769,11 +1052,7 @@ class RivalsBot(commands.Bot):
             elif kind == "match-start":
                 embed = self._build_match_start_embed(doc)
             else:
-                await self.db.news_posts.update_one(
-                    {"id": doc.get("id")},
-                    {"$set": {"discord_status": "ignored", "discord_updated_at": iso(now_utc())}},
-                )
-                return
+                embed = self._build_generic_news_embed(doc)
 
             async with self._discord_call_gate:
                 msg = await ch.send(embed=embed)
@@ -801,52 +1080,99 @@ class RivalsBot(commands.Bot):
                 },
             )
 
-    async def _send_news_doc_to_channel(self, doc: dict) -> None:
+    async def _send_news_doc_to_channel(self, doc: dict) -> tuple[discord.TextChannel, discord.Message]:
         ch = await self._news_channel()
         if not ch:
-            return
+            raise RuntimeError("NEWS_CHANNEL_ID is not reachable or not a text channel")
         kind = (doc.get("kind") or "").strip()
         if kind == "transfer_market":
             embed = await self._build_transfer_market_embed(ch.guild, doc)
         elif kind == "match-start":
             embed = self._build_match_start_embed(doc)
         else:
-            return
+            embed = self._build_generic_news_embed(doc)
         async with self._discord_call_gate:
-            await ch.send(embed=embed)
+            msg = await ch.send(embed=embed)
+        return ch, msg
 
     async def _process_news_job_payload(self, job_type: str, payload: dict):
+        news_id = ((payload or {}).get("news_id") or "").strip()
+
+        async def _mark_news_posted(ch_id: Optional[int], msg_id: Optional[int]):
+            if not news_id:
+                return
+            await self.db.news_posts.update_one(
+                {"id": news_id},
+                {
+                    "$set": {
+                        "discord_status": "posted",
+                        "discord_posted_at": iso(now_utc()),
+                        "discord_channel_id": ch_id,
+                        "discord_message_id": msg_id,
+                        "discord_updated_at": iso(now_utc()),
+                        "discord_last_error": "",
+                    }
+                },
+            )
+
+        async def _mark_news_failed(exc: Exception):
+            if not news_id:
+                return
+            await self.db.news_posts.update_one(
+                {"id": news_id},
+                {
+                    "$set": {
+                        "discord_status": "queued",
+                        "discord_last_error": str(exc)[:500],
+                        "discord_updated_at": iso(now_utc()),
+                    }
+                },
+            )
+
         if job_type == "news_transfer_market":
-            await self._send_news_doc_to_channel({"kind": "transfer_market", "payload": payload or {}})
+            try:
+                ch, msg = await self._send_news_doc_to_channel({"kind": "transfer_market", "payload": payload or {}})
+                await _mark_news_posted(getattr(ch, "id", None), getattr(msg, "id", None))
+            except Exception as exc:
+                await _mark_news_failed(exc)
+                raise
             return
 
         if job_type == "news_match_start":
-            await self._send_news_doc_to_channel(
-                {
-                    "kind": "match-start",
-                    "title": (payload or {}).get("title", "انطلاق مباراة جديدة"),
-                    "body": (payload or {}).get("body", ""),
-                    "payload": payload or {},
-                }
-            )
+            try:
+                ch, msg = await self._send_news_doc_to_channel(
+                    {
+                        "kind": "match-start",
+                        "title": (payload or {}).get("title", "انطلاق مباراة جديدة"),
+                        "body": (payload or {}).get("body", ""),
+                        "payload": payload or {},
+                    }
+                )
+                await _mark_news_posted(getattr(ch, "id", None), getattr(msg, "id", None))
+            except Exception as exc:
+                await _mark_news_failed(exc)
+                raise
             return
 
         if job_type == "news_match_score":
             # Disabled by product policy (start-only match alerts)
             return
 
-        # Generic hook for backend custom news payloads (allow-listed kinds only)
-        kind = ((payload or {}).get("kind") or "").strip()
-        if kind not in {"transfer_market", "match-start"}:
-            return
-        await self._send_news_doc_to_channel(
-            {
-                "kind": kind,
-                "title": (payload or {}).get("title", "RIVALS News"),
-                "body": (payload or {}).get("body", ""),
-                "payload": (payload or {}).get("payload") or payload or {},
-            }
-        )
+        # Generic hook for backend custom news payloads (supports all kinds)
+        kind = ((payload or {}).get("kind") or "news").strip()
+        try:
+            ch, msg = await self._send_news_doc_to_channel(
+                {
+                    "kind": kind,
+                    "title": (payload or {}).get("title", "RIVALS News"),
+                    "body": (payload or {}).get("body", ""),
+                    "payload": (payload or {}).get("payload") or payload or {},
+                }
+            )
+            await _mark_news_posted(getattr(ch, "id", None), getattr(msg, "id", None))
+        except Exception as exc:
+            await _mark_news_failed(exc)
+            raise
 
     def _slugify_channel_name(self, text: str) -> str:
         s = re.sub(r"[^\w\-\s]", "", (text or "").strip().lower(), flags=re.UNICODE)
@@ -1225,6 +1551,9 @@ class RivalsBot(commands.Bot):
             await interaction.response.send_message("❌ لا تملك صلاحية إغلاق هذه التذكرة.", ephemeral=True)
             return
 
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=False, thinking=False)
+
         await self.db.discord_tickets.update_one(
             {"guild_id": interaction.guild.id, "channel_id": interaction.channel.id},
             {
@@ -1237,10 +1566,7 @@ class RivalsBot(commands.Bot):
             },
         )
 
-        if not interaction.response.is_done():
-            await interaction.response.send_message("✅ تم إغلاق التذكرة. سيتم حذف القناة خلال 5 ثوان.", ephemeral=False)
-        else:
-            await interaction.followup.send("✅ تم إغلاق التذكرة. سيتم حذف القناة خلال 5 ثوان.", ephemeral=False)
+        await interaction.followup.send("✅ تم إغلاق التذكرة. سيتم حذف القناة خلال 5 ثوان.", ephemeral=False)
 
         await asyncio.sleep(5)
         try:
@@ -1265,6 +1591,9 @@ class RivalsBot(commands.Bot):
         if not await self._can_manage_ticket(interaction.user, ticket):
             await interaction.response.send_message("❌ لا تملك صلاحية أرشفة هذه التذكرة.", ephemeral=True)
             return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=False, thinking=False)
 
         creator_id = int(ticket.get("creator_discord_id") or 0)
         creator_member = interaction.guild.get_member(creator_id) if creator_id else None
@@ -1295,10 +1624,7 @@ class RivalsBot(commands.Bot):
             },
         )
 
-        if not interaction.response.is_done():
-            await interaction.response.send_message("🗂️ تم أرشفة التذكرة وقفلها.", ephemeral=False)
-        else:
-            await interaction.followup.send("🗂️ تم أرشفة التذكرة وقفلها.", ephemeral=False)
+        await interaction.followup.send("🗂️ تم أرشفة التذكرة وقفلها.", ephemeral=False)
 
     async def create_ticket_from_dropdown(self, interaction: discord.Interaction, ticket_category_id: str):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -1446,17 +1772,24 @@ class RivalsBot(commands.Bot):
     async def before_poll_jobs(self):
         await self.wait_until_ready()
 
+    @poll_jobs.error
+    async def poll_jobs_error(self, exc: Exception):
+        logger.exception("poll_jobs loop crashed: %s", exc)
+
     async def on_member_join(self, member: discord.Member):
         if member.guild.id != DISCORD_GUILD_ID:
             return
 
-        if WELCOME_CHANNEL_ID:
-            ch = member.guild.get_channel(WELCOME_CHANNEL_ID)
-            if ch:
-                try:
-                    await ch.send(f"👋 أهلاً {member.mention} في سيرفر RIVALS")
-                except Exception:
-                    pass
+        ch = await self._welcome_channel()
+        if ch:
+            try:
+                await ch.send(
+                    content=f"👋 أهلاً {member.mention}",
+                    embed=self._build_welcome_embed(member),
+                    view=WelcomeLinksView(),
+                )
+            except Exception as exc:
+                logger.warning("Welcome send failed in #%s: %s", ch.id, exc)
 
         # One-shot site sync on join (Plus + Clan)
         await self.sync_member_from_site(member)
@@ -1470,18 +1803,29 @@ class RivalsBot(commands.Bot):
         now_ts = now_utc().timestamp()
         if now_ts >= self._xp_cooldowns.get(key, 0):
             self._xp_cooldowns[key] = now_ts + XP_COOLDOWN_SECONDS
-            gained = random.randint(8, 15)
+            base_gain = random.randint(8, 15)
+            multiplier = self._vip_xp_multiplier_for_member(message.author)
+            gained = max(1, int(round(base_gain * multiplier)))
             res = await self._grant_xp(message.author, gained, source="message")
-            if res.get("leveled_up") and RANK_CHANNEL_ID > 0:
-                rank_channel = message.guild.get_channel(RANK_CHANNEL_ID)
-                if rank_channel:
-                    role_id = await self._resolve_level_role_id(message.guild.id, int(res["new_level"]))
-                    role_txt = f" <@&{role_id}>" if role_id else ""
+            if res.get("leveled_up") or res.get("role_granted"):
+                announce_channel = await self._resolve_level_up_channel(message.guild)
+                if announce_channel:
+                    role_id = await self._resolve_level_role_id(message.guild.id, int(res.get("new_level", 0) or 0))
+                    role_name = ""
+                    if role_id:
+                        role_obj = message.guild.get_role(int(role_id))
+                        if role_obj:
+                            role_name = role_obj.name
                     try:
+                        embed = self._build_level_up_announcement_embed(
+                            message.author,
+                            new_level=int(res.get("new_level", 0) or 0),
+                            role_name=role_name,
+                            multiplier=multiplier,
+                        )
+                        content = f"🎉 {message.author.mention}"
                         async with self._discord_call_gate:
-                            await rank_channel.send(
-                                f"🎉 مبروك {message.author.mention} وصلت لفل **{res['new_level']}**!{role_txt}"
-                            )
+                            await announce_channel.send(content=content, embed=embed)
                     except Exception:
                         pass
 
@@ -1569,6 +1913,29 @@ class TicketPanelView(discord.ui.View):
         self.add_item(select)
 
 
+class WelcomeLinksView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        if _is_http_url(WELCOME_WEBSITE_URL):
+            self.add_item(
+                discord.ui.Button(
+                    label="الموقع",
+                    style=discord.ButtonStyle.link,
+                    url=WELCOME_WEBSITE_URL,
+                    emoji="🌐",
+                )
+            )
+        if _is_http_url(WELCOME_RULES_URL):
+            self.add_item(
+                discord.ui.Button(
+                    label="القوانين",
+                    style=discord.ButtonStyle.link,
+                    url=WELCOME_RULES_URL,
+                    emoji="📜",
+                )
+            )
+
+
 @bot.command(name="ticket")
 async def ticket_cmd(ctx: commands.Context, *, subject: str = "دعم عام"):
     if not isinstance(ctx.author, discord.Member) or not ctx.guild:
@@ -1604,7 +1971,17 @@ async def ticket_panel_cmd(ctx: commands.Context):
 
 @bot.command(name="syncme")
 async def syncme_cmd(ctx: commands.Context):
-    u = await bot.db.users.find_one({"discord_id": str(ctx.author.id)}, {"_id": 0, "id": 1, "clan_id": 1})
+    u = await bot.db.users.find_one(
+        {"discord_id": str(ctx.author.id)},
+        {"_id": 0, "id": 1, "clan_id": 1, "discord_username": 1},
+    )
+    if not u:
+        uname = normalize_discord_username(getattr(ctx.author, "name", ""))
+        if uname:
+            u = await bot.db.users.find_one(
+                {"discord_username": {"$regex": f"^{re.escape(uname)}$", "$options": "i"}},
+                {"_id": 0, "id": 1, "clan_id": 1, "discord_username": 1},
+            )
     if not u:
         await ctx.reply("حسابك غير مرتبط بالمنصة بعد.", mention_author=False)
         return
@@ -1656,6 +2033,72 @@ async def sync_slash(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="news_test", description="اختبار قناة الأخبار في الديسكورد")
+async def news_test_slash(interaction: discord.Interaction):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("❌ هذا الأمر داخل السيرفر فقط.", ephemeral=True)
+        return
+    if not has_staff_access(interaction.user):
+        await interaction.response.send_message("❌ هذا الأمر مخصص للإدارة فقط.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    ch = await bot._news_channel()
+    if not ch:
+        await interaction.followup.send(
+            f"❌ تعذر الوصول لقناة الأخبار. تحقق من DISCORD_NEWS_CHANNEL_ID الحالي: `{NEWS_CHANNEL_ID}`",
+            ephemeral=True,
+        )
+        return
+    try:
+        embed = discord.Embed(
+            title="✅ اختبار قناة الأخبار",
+            description="إذا وصلك هذا الإعلان فالبوت قادر على نشر الأخبار بشكل سليم.",
+            color=discord.Color.green(),
+            timestamp=now_utc(),
+        )
+        embed.set_footer(text="RIVALS • News Test")
+        async with bot._discord_call_gate:
+            msg = await ch.send(embed=embed)
+        await interaction.followup.send(
+            f"✅ تم الإرسال بنجاح إلى {ch.mention} (message_id={msg.id})",
+            ephemeral=True,
+        )
+    except Exception as exc:
+        await interaction.followup.send(f"❌ فشل إرسال اختبار الأخبار: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="welcome_test", description="اختبار رسالة الترحيب في قناة الترحيب")
+async def welcome_test_slash(interaction: discord.Interaction):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("❌ هذا الأمر داخل السيرفر فقط.", ephemeral=True)
+        return
+    if not has_staff_access(interaction.user):
+        await interaction.response.send_message("❌ هذا الأمر مخصص للإدارة فقط.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    ch = await bot._welcome_channel()
+    if not ch:
+        await interaction.followup.send(
+            f"❌ تعذر الوصول لقناة الترحيب. تحقق من DISCORD_WELCOME_CHANNEL_ID الحالي: `{WELCOME_CHANNEL_ID}`",
+            ephemeral=True,
+        )
+        return
+    try:
+        embed = bot._build_welcome_embed(interaction.user)
+        embed.title = "👋 اختبار الترحيب"
+        embed.description = "إذا ظهرت هذه الرسالة فـ قناة الترحيب مضبوطة بشكل صحيح."
+        async with bot._discord_call_gate:
+            msg = await ch.send(content=f"مرحباً {interaction.user.mention}", embed=embed, view=WelcomeLinksView())
+        await interaction.followup.send(
+            f"✅ تم إرسال اختبار الترحيب إلى {ch.mention} (message_id={msg.id})",
+            ephemeral=True,
+        )
+    except Exception as exc:
+        await interaction.followup.send(f"❌ فشل إرسال اختبار الترحيب: {exc}", ephemeral=True)
+
+
 @bot.tree.command(name="rank", description="عرض مستواك الحالي")
 async def rank_slash(interaction: discord.Interaction):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -1669,10 +2112,88 @@ async def rank_slash(interaction: discord.Interaction):
         {"guild_id": interaction.guild.id, "user_id": interaction.user.id},
         {"_id": 0, "xp": 1, "level": 1},
     ) or {"xp": 0, "level": 0}
-    await interaction.response.send_message(
-        f"📊 {interaction.user.mention} | XP: {int(doc.get('xp', 0))} | Level: {int(doc.get('level', 0))}",
-        ephemeral=True,
+    mult = bot._vip_xp_multiplier_for_member(interaction.user)
+    embed = bot._build_rank_embed(
+        interaction.user,
+        xp=int(doc.get("xp", 0) or 0),
+        level=int(doc.get("level", 0) or 0),
+        gained=0,
+        multiplier=mult,
     )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.command(name="rank")
+async def rank_cmd(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not ctx.guild:
+        await ctx.reply("❌ هذا الأمر داخل السيرفر فقط.", mention_author=False)
+        return
+    if RANK_CHANNEL_ID > 0 and int(ctx.channel.id) != int(RANK_CHANNEL_ID):
+        await ctx.reply(f"❌ استخدم الأمر داخل <#{RANK_CHANNEL_ID}> فقط.", mention_author=False)
+        return
+
+    doc = await bot.db.discord_levels.find_one(
+        {"guild_id": ctx.guild.id, "user_id": ctx.author.id},
+        {"_id": 0, "xp": 1, "level": 1},
+    ) or {"xp": 0, "level": 0}
+    mult = bot._vip_xp_multiplier_for_member(ctx.author)
+    embed = bot._build_rank_embed(
+        ctx.author,
+        xp=int(doc.get("xp", 0) or 0),
+        level=int(doc.get("level", 0) or 0),
+        gained=0,
+        multiplier=mult,
+    )
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+@bot.command(name="set_level_channel")
+async def set_level_channel_cmd(ctx: commands.Context, *, target: str = ""):
+    if not isinstance(ctx.author, discord.Member) or not ctx.guild:
+        await ctx.reply("❌ هذا الأمر داخل السيرفر فقط.", mention_author=False)
+        return
+    if not has_staff_access(ctx.author):
+        await ctx.reply("❌ هذا الأمر مخصص للإدارة فقط.", mention_author=False)
+        return
+
+    raw = (target or "").strip()
+    # !set_level_channel default  -> clear explicit channel and fallback to general/system
+    if raw.lower() in {"default", "general", "auto"}:
+        await bot.db.discord_bot_settings.update_one(
+            {"guild_id": ctx.guild.id},
+            {"$set": {"updated_at": iso(now_utc())}, "$unset": {"level_up_channel_id": ""}},
+            upsert=True,
+        )
+        await ctx.reply("✅ تم ضبط قناة التهنئة على الوضع الافتراضي (الشات العام/النظام).", mention_author=False)
+        return
+
+    # no target => current channel
+    channel: Optional[discord.TextChannel] = None
+    if not raw:
+        channel = ctx.channel if isinstance(ctx.channel, discord.TextChannel) else None
+    else:
+        m = re.search(r"(\d{8,25})", raw)
+        if m:
+            ch = ctx.guild.get_channel(int(m.group(1)))
+            if isinstance(ch, discord.TextChannel):
+                channel = ch
+
+    if not channel:
+        await ctx.reply("❌ حدّد قناة صحيحة أو استخدم: `!set_level_channel default`", mention_author=False)
+        return
+
+    await bot.db.discord_bot_settings.update_one(
+        {"guild_id": ctx.guild.id},
+        {
+            "$set": {
+                "level_up_channel_id": int(channel.id),
+                "updated_by": int(ctx.author.id),
+                "updated_at": iso(now_utc()),
+            }
+        },
+        upsert=True,
+    )
+    await ctx.reply(f"✅ تم تعيين قناة تهنئة التلفيل إلى {channel.mention}", mention_author=False)
 
 
 @bot.tree.command(name="set_level_role", description="تحديد رتبة تلقائية لمستوى معيّن")
@@ -1734,8 +2255,9 @@ async def hide_slash(interaction: discord.Interaction):
         await interaction.response.send_message("❌ هذا الأمر يعمل داخل السيرفر فقط.", ephemeral=True)
         return
 
+    await interaction.response.defer(ephemeral=True, thinking=True)
     msg = await bot.toggle_plus_visibility(interaction.user, interaction.channel, visible=False)
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @bot.tree.command(name="show", description="إظهار روم البلس الخاص بكم")
@@ -1744,8 +2266,9 @@ async def show_slash(interaction: discord.Interaction):
         await interaction.response.send_message("❌ هذا الأمر يعمل داخل السيرفر فقط.", ephemeral=True)
         return
 
+    await interaction.response.defer(ephemeral=True, thinking=True)
     msg = await bot.toggle_plus_visibility(interaction.user, interaction.channel, visible=True)
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @bot.tree.command(name="tickets_panel", description="نشر لوحة تذاكر الدعم الفني")

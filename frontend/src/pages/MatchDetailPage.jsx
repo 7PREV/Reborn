@@ -9,6 +9,8 @@ import ChatMessage from "../components/match/ChatMessage";
 import LiveStreamsPanel from "../components/match/LiveStreamsPanel";
 import MatchPrayerBreak from "../components/match/MatchPrayerBreak";
 import H2HWidget from "../components/match/H2HWidget";
+import RivalsGuardPanel from "../components/match/RivalsGuardPanel";
+import SanadChatWidget from "../components/match/SanadChatWidget";
 
 const IMG_MAX = 3_000_000;
 const POLL_MS = 4000;
@@ -179,6 +181,20 @@ function MvpVoteModal({ status, onVote }) {
   );
 }
 
+function TacticalPrayerBanner({ banner }) {
+  if (!banner?.message) return null;
+  const remaining = banner?.window_ends_at ? new Date(banner.window_ends_at) - new Date() : 0;
+  if (remaining <= 0) return null;
+  const mins = Math.max(1, Math.ceil(remaining / 60000));
+  return (
+    <div data-testid="tactical-prayer-banner" className="mb-3 rounded-lg border border-emerald-500/35 bg-emerald-500/10 p-3">
+      <div className="text-[10px] uppercase tracking-widest text-emerald-300 mb-1">Tactical Prayer Window</div>
+      <p className="text-sm text-emerald-100 leading-relaxed">{banner.message}</p>
+      <div className="mt-1 text-xs text-emerald-200/80">نافذة التفعيل متاحة الآن — متبقي تقريباً {mins} دقيقة</div>
+    </div>
+  );
+}
+
 export default function MatchDetailPage() {
   const { id } = useParams();
   const { user } = useAuth();
@@ -193,6 +209,9 @@ export default function MatchDetailPage() {
   const [video, setVideo] = useState(null);     // {url, name, size}
   const [videoProgress, setVideoProgress] = useState(0);
   const [mvpStatus, setMvpStatus] = useState(null);
+  const [tacticalBanner, setTacticalBanner] = useState(null);
+  const [guardStatus, setGuardStatus] = useState(null);
+  const lastAlertKeyRef = useRef("");
   const scrollRef = useRef(null);
 
   const loadMatch = useCallback(async () => {
@@ -211,11 +230,38 @@ export default function MatchDetailPage() {
       setCanWrite(data.can_write);
       setIsAdminFlag(Boolean(data.is_admin || isManagementUser));
       setUserClanInChat(data.user_clan_id);
+      setTacticalBanner(data.tactical_banner || null);
     } catch {
       // 401/403 expected for guests / outsiders; polling retries
       setIsAdminFlag(Boolean(isManagementUser));
+      setTacticalBanner(null);
     }
   }, [id, isManagementUser]);
+
+  useEffect(() => {
+    if (!tacticalBanner?.issued_at) return;
+    if (lastAlertKeyRef.current === tacticalBanner.issued_at) return;
+    lastAlertKeyRef.current = tacticalBanner.issued_at;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 528;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.03, ctx.currentTime + 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.4);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 1.45);
+      setTimeout(() => ctx.close(), 1800);
+    } catch {
+      // silent fallback
+    }
+  }, [tacticalBanner?.issued_at]);
 
   const loadMvpStatus = useCallback(async () => {
     try {
@@ -303,6 +349,10 @@ export default function MatchDetailPage() {
   };
 
   const vote = async (idx, winnerClanId) => {
+    if (match?.status === "live" && guardStatus && !guardStatus.all_pc_ready && !isAdminFlag) {
+      toast.error("لا يمكن بدء/متابعة الجولة حتى تفعيل Rivals Guard لكل لاعبي PC");
+      return;
+    }
     try {
       await api.post(`/matches/${id}/vote-map`, { map_index: idx, winner_clan_id: winnerClanId });
       loadMatch();
@@ -326,6 +376,10 @@ export default function MatchDetailPage() {
   };
 
   const startGrace = async (idx) => {
+    if (match?.status === "live" && guardStatus && !guardStatus.all_pc_ready && !isAdminFlag) {
+      toast.error("لا يمكن بدء/متابعة الجولة حتى تفعيل Rivals Guard لكل لاعبي PC");
+      return;
+    }
     try {
       await api.post(`/matches/${id}/maps/${idx}/grace`);
       toast.success("بدأت مهلة 10 دقائق");
@@ -334,6 +388,10 @@ export default function MatchDetailPage() {
   };
 
   const startPrayer = async (idx) => {
+    if (match?.status === "live" && guardStatus && !guardStatus.all_pc_ready && !isAdminFlag) {
+      toast.error("لا يمكن بدء/متابعة الجولة حتى تفعيل Rivals Guard لكل لاعبي PC");
+      return;
+    }
     try {
       await api.post(`/matches/${id}/maps/${idx}/prayer`);
       toast.success("استراحة صلاة بدأت — المهلة موقوفة");
@@ -342,6 +400,10 @@ export default function MatchDetailPage() {
   };
 
   const claimGraceWin = async (idx) => {
+    if (match?.status === "live" && guardStatus && !guardStatus.all_pc_ready && !isAdminFlag) {
+      toast.error("لا يمكن بدء/متابعة الجولة حتى تفعيل Rivals Guard لكل لاعبي PC");
+      return;
+    }
     try {
       await api.post(`/matches/${id}/maps/${idx}/claim-grace-win`);
       toast.success("تم احتساب الفوز بالماب");
@@ -403,6 +465,7 @@ export default function MatchDetailPage() {
   };
 
   const isStaffOfMatch = isAdminFlag || isLeaderA || isLeaderB;
+  const isParticipant = !!(user?.clan_id && [match?.clan_a?.id, match?.clan_b?.id].includes(user.clan_id));
 
   return (
     <div className="space-y-6">
@@ -450,12 +513,16 @@ export default function MatchDetailPage() {
             </span>
             <div className="mr-auto flex items-center gap-2 flex-wrap">
               <MatchPrayerBreak
-                match={match}
+                match={{ ...match, tactical_banner: tacticalBanner }}
                 userSide={isLeaderA ? "A" : isLeaderB ? "B" : null}
                 isStaff={isAdminFlag}
                 onUpdate={() => { loadMatch(); loadChat(); }}
               />
             </div>
+          </div>
+
+          <div className="px-4 pt-3">
+            <TacticalPrayerBanner banner={tacticalBanner} />
           </div>
 
           <div ref={scrollRef} className="h-[500px] overflow-y-auto p-4 space-y-3" data-testid="chat-messages">
@@ -494,10 +561,22 @@ export default function MatchDetailPage() {
         </div>
 
         <aside className="lg:sticky lg:top-20 self-start space-y-4">
+          <RivalsGuardPanel
+            matchId={id}
+            user={user}
+            isStaff={isAdminFlag}
+            onStatusChange={(snapshot) => setGuardStatus(snapshot)}
+          />
           <H2HWidget matchId={id} />
           <LiveStreamsPanel matchId={id} />
         </aside>
       </div>
+
+      <SanadChatWidget
+        matchId={id}
+        disabled={!(isAdminFlag || isParticipant)}
+        onSynced={() => loadChat()}
+      />
     </div>
   );
 }

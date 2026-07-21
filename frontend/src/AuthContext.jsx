@@ -22,23 +22,38 @@ export function AuthProvider({ children }) {
     refresh();
   }, [refresh]);
 
-  const login = useCallback(async (email, password) => {
+  const login = useCallback(async (email, password, otp = "") => {
     const { csrfToken, recaptchaToken, turnstileToken } = collectSecurityTokens();
     const { data } = await api.post("/auth/login", {
       email,
       password,
+      otp: otp || undefined,
       csrf_token: csrfToken || undefined,
       recaptcha_token: recaptchaToken || undefined,
       cf_turnstile_response: turnstileToken || undefined,
     });
-    setUser(data.user);
-    return data.user;
+    if (data?.user) setUser(data.user);
+    return data;
   }, []);
 
   const register = useCallback(async (payload) => {
     const { data } = await api.post("/auth/register", payload);
-    setUser(data.user);
-    return data.user;
+    if (data?.user) setUser(data.user);
+    return data;
+  }, []);
+
+  const forgotPassword = useCallback(async (email) => {
+    const { data } = await api.post("/auth/forgot-password", { email });
+    return data;
+  }, []);
+
+  const resetPassword = useCallback(async (email, otp, newPassword) => {
+    const { data } = await api.post("/auth/reset-password", {
+      email,
+      otp,
+      new_password: newPassword,
+    });
+    return data;
   }, []);
 
   const logout = useCallback(async () => {
@@ -62,8 +77,8 @@ export function AuthProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, loading, login, register, logout, refresh, refreshToken, listSessions }),
-    [user, loading, login, register, logout, refresh, refreshToken, listSessions]
+    () => ({ user, loading, login, register, forgotPassword, resetPassword, logout, refresh, refreshToken, listSessions }),
+    [user, loading, login, register, forgotPassword, resetPassword, logout, refresh, refreshToken, listSessions]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

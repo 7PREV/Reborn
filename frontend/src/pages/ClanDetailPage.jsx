@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useLocation } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
 import { Shield, UserPlus, Swords, LogOut, Trash2, Sparkles, Power, Trophy, UserCheck, Crown, Image as ImageIcon } from "lucide-react";
@@ -89,7 +89,7 @@ function Stat({ label, value, highlight }) {
   );
 }
 
-function ActionBar({ canJoin, isFull, isStaff, isMember, isLeader, canSearchChallenge, isPlusClan, clanId, onJoin, onChallenge, onInvite, onLeave, onDelete, onArchive }) {
+function ActionBar({ canJoin, isFull, isStaff, isMember, isLeader, canSearchChallenge, isPlusClan, clanId, onJoin, onChallenge, onInvite, onLeave, onDelete, onArchive, leaving = false }) {
   return (
     <div className="flex gap-2 flex-wrap items-center">
       {canJoin && !isFull && (
@@ -118,8 +118,13 @@ function ActionBar({ canJoin, isFull, isStaff, isMember, isLeader, canSearchChal
         </>
       )}
       {isMember && !isLeader && (
-        <button onClick={onLeave} className="px-4 py-2 rounded-lg border b-soft hover:bg-white/5 flex items-center gap-2 text-sm text-white/60">
-          <LogOut size={15} /> مغادرة
+        <button
+          onClick={onLeave}
+          disabled={leaving}
+          data-testid="leave-clan-btn"
+          className="px-4 py-2 rounded-lg border border-red-500/40 bg-gradient-to-b from-red-600/30 to-red-700/20 text-red-200 hover:text-white hover:border-red-400 hover:from-red-600/45 hover:to-red-700/35 active:scale-[0.98] transition-all duration-200 shadow-[0_0_0_rgba(239,68,68,0)] hover:shadow-[0_0_18px_rgba(239,68,68,0.35)] disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2 text-sm font-semibold"
+        >
+          <LogOut size={15} className={leaving ? "animate-pulse" : ""} /> {leaving ? "جاري المغادرة..." : "مغادرة"}
         </button>
       )}
       {isLeader && (
@@ -242,7 +247,7 @@ function TrophyRoom({ trophies }) {
   );
 }
 
-function AttendancePanel({ clan, attendance, canInteract, isCheckedIn, onCheckIn, onCheckOut }) {
+function AttendancePanel({ clan, attendance, canInteract, isCheckedIn, onCheckIn, onCheckOut, highlightCheckIn }) {
   const summary = attendance?.summary || clan?.attendance || {};
   const checked = attendance?.checked_in || [];
   const count = summary.count || 0;
@@ -271,11 +276,11 @@ function AttendancePanel({ clan, attendance, canInteract, isCheckedIn, onCheckIn
         {/* Check-in / check-out button */}
         {canInteract ? (
           isCheckedIn ? (
-            <button onClick={onCheckOut} className="px-5 py-2.5 rounded-lg border b-soft hover:bg-white/5 text-sm font-medium">
+            <button onClick={onCheckOut} className={`px-5 py-2.5 rounded-lg border b-soft hover:bg-white/5 text-sm font-medium ${highlightCheckIn ? "ring-2 ring-emerald-400/60 shadow-[0_0_18px_rgba(16,185,129,0.45)]" : ""}`}>
               إلغاء التحضير
             </button>
           ) : (
-            <button onClick={onCheckIn} className="px-5 py-2.5 rounded-lg bg-emerald-500 text-black font-bold hover:bg-emerald-400 text-sm">
+            <button onClick={onCheckIn} className={`px-5 py-2.5 rounded-lg bg-emerald-500 text-black font-bold hover:bg-emerald-400 text-sm ${highlightCheckIn ? "ring-2 ring-emerald-300 shadow-[0_0_22px_rgba(16,185,129,0.55)] animate-pulse" : ""}`}>
               تحضير الآن
             </button>
           )
@@ -415,6 +420,7 @@ function RequestsList({ requests, onAccept, onReject }) {  if (requests.length =
 
 export default function ClanDetailPage() {
   const { id } = useParams();
+  const location = useLocation();
   const { user, refresh } = useAuth();
   const [clan, setClan] = useState(null);
   const [requests, setRequests] = useState([]);
@@ -431,6 +437,7 @@ export default function ClanDetailPage() {
   const [inviteResults, setInviteResults] = useState([]);
   const [opponent, setOpponent] = useState("");
   const [logoUploading, setLogoUploading] = useState(false);
+  const [leaving, setLeaving] = useState(false);
 
   const handleErr = (err) => toast.error(formatApiErrorDetail(err.response?.data?.detail));
 
@@ -503,6 +510,10 @@ export default function ClanDetailPage() {
   const targetIsGreen = !!(attendance?.summary?.is_green || clan?.attendance?.is_green);
   const canInstantChallenge = isExternalLeader && targetIsGreen;
   const isCheckedIn = !!attendance?.checked_in?.some((p) => p.id === user?.id);
+  const highlightCheckIn = useMemo(() => {
+    const params = new URLSearchParams(location.search || "");
+    return params.get("highlight_checkin") === "1";
+  }, [location.search]);
 
   if (!clan) return <div className="text-white/40">جارٍ التحميل...</div>;
 
@@ -548,10 +559,18 @@ export default function ClanDetailPage() {
   const leave = async () => {
     // eslint-disable-next-line no-alert
     if (!confirm("مغادرة الكلان؟")) return;
-    await api.post(`/clans/${id}/leave`);
-    await refresh();
-    toast.success("غادرت الكلان");
-    load();
+      setLeaving(true);
+      try {
+        const { data } = await api.post(`/clans/${id}/leave`);
+        await refresh();
+        const cdHours = Number(data?.cooldown_hours || 3);
+        toast.success(`غادرت الكلان. يمكنك الانضمام مجددًا بعد ${cdHours} ساعات`);
+        load();
+      } catch (err) {
+        handleErr(err);
+      } finally {
+        setLeaving(false);
+      }
   };
 
   const delClan = async () => {
@@ -746,6 +765,7 @@ export default function ClanDetailPage() {
           onLeave={leave}
           onDelete={delClan}
           onArchive={archive}
+          leaving={leaving}
         />
       </div>
 
@@ -816,6 +836,7 @@ export default function ClanDetailPage() {
           attendance={attendance}
           canInteract={!!flags.isMember}
           isCheckedIn={isCheckedIn}
+          highlightCheckIn={highlightCheckIn}
           onCheckIn={checkIn}
           onCheckOut={checkOut}
         />

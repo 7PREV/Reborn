@@ -1,7 +1,18 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import api from "../api";
-import { Shield, Trophy, Tv, Twitch, Sparkles, ArrowRight } from "lucide-react";
+import { Shield, Trophy, Sparkles, ArrowRight, Check, Flame, Swords } from "lucide-react";
+import { FaTwitch, FaYoutube, FaTiktok, FaInstagram, FaXTwitter, FaDiscord } from "react-icons/fa6";
+import { SiKick } from "react-icons/si";
+
+const SOCIAL_PLATFORMS = [
+  { key: "twitch_url", label: "Twitch", testid: "ply-social-twitch", Icon: FaTwitch, color: "#a970ff" },
+  { key: "kick_url", label: "Kick", testid: "ply-social-kick", Icon: SiKick, color: "#53fc18" },
+  { key: "youtube_url", label: "YouTube", testid: "ply-social-youtube", Icon: FaYoutube, color: "#ff0000" },
+  { key: "tiktok_url", label: "TikTok", testid: "ply-social-tiktok", Icon: FaTiktok, color: "#ffffff" },
+  { key: "instagram_link", label: "Instagram", testid: "ply-social-instagram", Icon: FaInstagram, color: "#e1306c" },
+  { key: "x_link", label: "X", testid: "ply-social-x", Icon: FaXTwitter, color: "#ffffff" },
+];
 
 export default function PlayerProfilePage() {
   const { id } = useParams();
@@ -21,7 +32,7 @@ export default function PlayerProfilePage() {
   const accent = (isPlus && u.accent_color) || "#FFCC00";
   const bannerStyle = isPlus && u.banner
     ? { backgroundImage: `url(${u.banner})`, backgroundSize: "cover", backgroundPosition: "center" }
-    : { background: `linear-gradient(135deg, ${accent}22, transparent 80%)` };
+    : { backgroundColor: accent };
   const initial = (u.username?.[0] || "?").toUpperCase();
   const wins = u.wins || 0;
   const losses = u.losses || 0;
@@ -54,11 +65,16 @@ export default function PlayerProfilePage() {
             </div>
             <div className="flex-1 min-w-0">
               {u.act ? (
-                <h1 data-testid="player-act" className="font-display font-black text-3xl md:text-4xl truncate" style={{ color: accent }}>{u.act}</h1>
+                <h1 data-testid="player-act" className="font-display font-black text-2xl sm:text-3xl md:text-4xl leading-tight break-all whitespace-normal" style={{ color: accent }}>{u.act}</h1>
               ) : (
-                <h1 className="font-display font-black text-3xl md:text-4xl truncate text-white/70">{u.username}</h1>
+                <h1 className="font-display font-black text-2xl sm:text-3xl md:text-4xl leading-tight break-all whitespace-normal text-white/70">{u.username}</h1>
               )}
               <div className="text-white/50 text-sm mt-1">@{u.username}</div>
+              {!!u.discord_username && (
+                <div className="text-white/65 text-xs mt-1 inline-flex items-center gap-1.5" dir="ltr" data-testid="player-discord-username">
+                  <FaDiscord size={13} color="#5865F2" /> @{String(u.discord_username).replace(/^@+/, "")}
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-4">
               <Stat label="نقاط" value={u.points || 0} accent={accent} testid="player-points" />
@@ -67,19 +83,23 @@ export default function PlayerProfilePage() {
             </div>
           </div>
 
-          <div className="mt-6">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4" data-testid="player-achievements">
-              <AchievementBadge label="عدد مرات التحضير" value={u.attendances || 0} accent={accent} />
-              <AchievementBadge label="نجم المباراة" value={u.mvp_count || 0} accent={accent} />
-              <AchievementBadge label="Wins" value={wins} accent={accent} />
-              <AchievementBadge label="Losses" value={losses} accent={accent} />
+          <div className="mt-6 grid lg:grid-cols-[1.2fr_1fr] gap-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-white/40 mb-2">الإنجازات</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2" data-testid="player-achievements">
+                <AchievementBadge icon={<Check size={14} />} label="عدد مرات التحضير" value={u.attendances || 0} accent={accent} tone="silver" />
+                <AchievementBadge icon={<Trophy size={14} />} label="نجم المباراة" value={u.mvp_count || 0} accent={accent} tone="gold" />
+                <AchievementBadge icon={<Swords size={14} />} label="Wins" value={wins} accent={accent} tone="bronze" />
+                <AchievementBadge icon={<Flame size={14} />} label="Losses" value={losses} accent={accent} tone="danger" />
+              </div>
             </div>
-            <div className="text-[10px] uppercase tracking-widest text-white/40 mb-2">القنوات والحسابات</div>
-            <div className="space-y-2">
-              <SocialRow icon={<Twitch size={16} />} label="Twitch" url={u.twitch_url} accent={accent} testid="ply-social-twitch" />
-              <SocialRow icon={<Tv size={16} />} label="Kick" url={u.kick_url} accent={accent} testid="ply-social-kick" />
-              <SocialRow icon={<Tv size={16} />} label="YouTube" url={u.youtube_url} accent={accent} testid="ply-social-youtube" />
-              <SocialRow icon={<Tv size={16} />} label="TikTok" url={u.tiktok_url} accent={accent} testid="ply-social-tiktok" />
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-white/40 mb-2">القنوات والحسابات</div>
+              <div className="space-y-2">
+                {SOCIAL_PLATFORMS.map((p) => (
+                  <SocialRow key={p.key} platform={p} url={u?.[p.key] || ""} />
+                ))}
+              </div>
             </div>
           </div>
 
@@ -110,28 +130,48 @@ function Stat({ label, value, accent, testid }) {
   );
 }
 
-function SocialRow({ icon, label, url, accent, testid }) {
+function SocialRow({ platform, url }) {
+  const { Icon, label, color, testid } = platform;
+  const iconNode = <Icon size={16} color={color} />;
   if (!url) {
     return (
-      <div className="flex items-center gap-3 bg-background/40 border b-soft rounded-md px-3 py-2 text-sm text-white/40" data-testid={testid}>
-        <span style={{ color: accent }}>{icon}</span>
-        <span className="font-bold w-16">{label}</span>
+      <div className="w-full flex items-center gap-3 bg-[#111113] border border-gray-900 rounded-lg px-3 py-3 text-sm text-white/40" data-testid={testid}>
+        <span>{iconNode}</span>
+        <span className="font-bold w-16 shrink-0">{label}</span>
         <span className="text-xs">— لا يوجد رابط —</span>
       </div>
     );
   }
   return (
-    <a href={url} target="_blank" rel="noreferrer" data-testid={testid} className="flex items-center gap-3 bg-background/40 border b-soft rounded-md px-3 py-2 text-sm hover:border-gold-500/40 transition">
-      <span style={{ color: accent }}>{icon}</span>
-      <span className="font-bold w-16">{label}</span>
+    <a href={url} target="_blank" rel="noreferrer" data-testid={testid} className="w-full flex items-center gap-3 bg-[#111113] border border-gray-900 rounded-lg px-3 py-3 text-sm hover:border-gray-700 hover:bg-[#18181b] transition">
+      <span>{iconNode}</span>
+      <span className="font-bold w-16 shrink-0">{label}</span>
       <span className="text-white/70 truncate flex-1">{url}</span>
+      <span className="text-royalGold-400 text-xs">فتح</span>
     </a>
   );
 }
 
-function AchievementBadge({ label, value, accent }) {
+function AchievementBadge({ icon, label, value, accent, tone = "gold" }) {
+  const toneClass = tone === "gold"
+    ? "border-royalGold-500/30 bg-royalGold-500/8"
+    : tone === "silver"
+      ? "border-gray-300/30 bg-gray-300/10"
+      : tone === "bronze"
+        ? "border-slate-500/40 bg-slate-500/10"
+        : "border-destructive/35 bg-destructive/10";
+  const iconClass = tone === "gold"
+    ? "text-royalGold-400"
+    : tone === "silver"
+      ? "text-gray-300"
+      : tone === "bronze"
+        ? "text-slate-400"
+        : "text-destructive";
   return (
-    <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 px-3 py-2 text-center">
+    <div className={`rounded-xl border px-3 py-2 text-center ${toneClass}`}>
+      <div className="mb-1 inline-flex items-center justify-center h-6 w-6 rounded-full bg-black/20">
+        <span className={iconClass}>{icon}</span>
+      </div>
       <div className="text-lg font-display font-black" style={{ color: accent }}>{value}</div>
       <div className="text-[10px] text-white/60">{label}</div>
     </div>

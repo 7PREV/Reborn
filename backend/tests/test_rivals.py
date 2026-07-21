@@ -4,6 +4,13 @@ import uuid
 import pytest
 import requests
 
+from _auth_test_utils import (
+    count_pending_reset_otps,
+    create_user_and_token,
+    ensure_admin_token,
+    test_headers as _headers,
+)
+
 BASE_URL = (
     os.environ.get("TEST_BASE_URL")
     or os.environ.get("REACT_APP_BACKEND_URL")
@@ -17,22 +24,21 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin@12345")
 def _register(suffix):
     email = f"test_{suffix}_{uuid.uuid4().hex[:6]}@example.com"
     s = requests.Session()
-    r = s.post(f"{API}/auth/register", json={
-        "email": email,
-        "username": f"tu_{suffix}_{uuid.uuid4().hex[:5]}",
-        "password": "Pass@1234",
-        "act": f"COD_{suffix}",
-        "accepted_terms": True,
-    })
-    assert r.status_code == 200, r.text
-    return s, r.json()["user"], r.json()["token"], email
+    user, token = create_user_and_token(
+        role="player",
+        email=email,
+        username=f"tu_{suffix}_{uuid.uuid4().hex[:5]}",
+        act=f"COD_{suffix}",
+    )
+    me = s.get(f"{API}/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200, me.text
+    return s, me.json(), token, email
 
 
 def _login_admin():
     s = requests.Session()
-    r = s.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
-    assert r.status_code == 200, r.text
-    return s, r.json()["user"], r.json()["token"]
+    user, token = ensure_admin_token(ADMIN_EMAIL)
+    return s, user, token
 
 
 def _add_members_to_clan(leader_token: str, clan_id: str, count: int = 5):
@@ -506,7 +512,7 @@ def test_withdraw_outsider_forbidden(admin, leader_a, leader_b):
 # ---- New launch features ----
 def test_act_required_for_register():
     """Registration without `act` must fail with 422."""
-    r = requests.post(f"{API}/auth/register", json={
+    r = requests.post(f"{API}/auth/register", headers=_headers(), json={
         "email": f"noact_{uuid.uuid4().hex[:6]}@example.com",
         "username": f"noact_{uuid.uuid4().hex[:5]}",
         "password": "Pass@1234",
@@ -516,7 +522,7 @@ def test_act_required_for_register():
 
 
 def test_register_requires_terms_acceptance():
-    r = requests.post(f"{API}/auth/register", json={
+    r = requests.post(f"{API}/auth/register", headers=_headers(), json={
         "email": f"noterms_{uuid.uuid4().hex[:6]}@example.com",
         "username": f"noterms_{uuid.uuid4().hex[:5]}",
         "password": "Pass@1234",
@@ -527,13 +533,11 @@ def test_register_requires_terms_acceptance():
 
 
 def test_forgot_password_creates_admin_request(admin):
-    """Forgot-password always returns 200, and admin sees the pending reset."""
+    """Forgot-password always returns 200, and creates a pending reset OTP record."""
     s, u, t, _ = _register("forgot")
-    r = requests.post(f"{API}/auth/forgot-password", json={"email": u["email"]})
+    r = requests.post(f"{API}/auth/forgot-password", headers=_headers(), json={"email": u["email"]})
     assert r.status_code == 200
-    h = {"Authorization": f"Bearer {admin['token']}"}
-    resets = requests.get(f"{API}/admin/password-resets", headers=h).json()
-    assert any(x["user_id"] == u["id"] for x in resets)
+    assert count_pending_reset_otps(u["id"]) >= 1
 
 
 def test_current_league_arabic_name():
@@ -703,8 +707,8 @@ def test_match_prayer_break_pauses_voting(admin):
         "clan_a_id": ca["id"], "clan_b_id": cb["id"],
     }).json()
     mid = m["id"]
-    # Start prayer break as leader A
-    pb = requests.post(f"{API}/matches/{mid}/match-prayer-break", headers=h_a)
+    # Start prayer break as admin (staff override bypasses Zikr window)
+    pb = requests.post(f"{API}/matches/{mid}/match-prayer-break", headers=h_admin)
     assert pb.status_code == 200
     assert pb.json().get("ends_at")
     # Voting must now be blocked
@@ -713,8 +717,8 @@ def test_match_prayer_break_pauses_voting(admin):
     })
     assert v.status_code == 400
     assert "بريك" in v.json().get("detail", "")
-    # Resume as leader A
-    rs = requests.post(f"{API}/matches/{mid}/match-prayer-resume", headers=h_a)
+    # Resume as admin
+    rs = requests.post(f"{API}/matches/{mid}/match-prayer-resume", headers=h_admin)
     assert rs.status_code == 200
     # Voting works after resume
     v2 = requests.post(f"{API}/matches/{mid}/vote-map", headers=h_a, json={
@@ -723,7 +727,7 @@ def test_match_prayer_break_pauses_voting(admin):
     assert v2.status_code == 200
 
 
-def test_match_prayer_resume_only_starter_or_admin(admin):
+def test_match_prayer_resume_requires_ready_or_admin(admin):
     s_a, u_a, t_a, _ = _register("mpb2_a")
     s_b, u_b, t_b, _ = _register("mpb2_b")
     h_admin = {"Authorization": f"Bearer {admin['token']}"}
@@ -739,10 +743,11 @@ def test_match_prayer_resume_only_starter_or_admin(admin):
         "clan_a_id": ca["id"], "clan_b_id": cb["id"],
     }).json()
     mid = m["id"]
-    requests.post(f"{API}/matches/{mid}/match-prayer-break", headers=h_a)
-    # Opponent leader cannot resume
+    requests.post(f"{API}/matches/{mid}/match-prayer-break", headers=h_admin)
+    # Opponent leader can mark ready, but this alone should not fully resume
     r = requests.post(f"{API}/matches/{mid}/match-prayer-resume", headers=h_b)
-    assert r.status_code == 403
+    assert r.status_code == 200
+    assert r.json().get("status") == "active"
     # Admin can resume
     r2 = requests.post(f"{API}/matches/{mid}/match-prayer-resume", headers=h_admin)
     assert r2.status_code == 200

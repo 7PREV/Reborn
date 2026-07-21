@@ -1,37 +1,115 @@
 import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, Link, useLocation } from "react-router-dom";
 import { useAuth } from "../AuthContext";
 import { formatApiErrorDetail } from "../api";
 import { toast } from "sonner";
 
 export default function AuthPage() {
-  const { login, register } = useAuth();
+  const { login, register, forgotPassword, resetPassword } = useAuth();
   const [tab, setTab] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  const [otpRequired, setOtpRequired] = useState(false);
   const [username, setUsername] = useState("");
   const [act, setAct] = useState("");
+  const [forgotMode, setForgotMode] = useState(false);
+  const [resetOtpSent, setResetOtpSent] = useState(false);
+  const [resetPasswordValue, setResetPasswordValue] = useState("");
+  const [resetPasswordConfirm, setResetPasswordConfirm] = useState("");
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const navigate = useNavigate();
+  const location = useLocation();
+  const referralCode = new URLSearchParams(location.search || "").get("ref") || "";
+
+  const resetFlowState = () => {
+    setOtp("");
+    setOtpRequired(false);
+    setForgotMode(false);
+    setResetOtpSent(false);
+    setResetPasswordValue("");
+    setResetPasswordConfirm("");
+  };
 
   const submit = async (e) => {
     e.preventDefault();
     setError("");
     setLoading(true);
     try {
+      if (forgotMode) {
+        if (!email) {
+          setError("اكتب بريدك الإلكتروني أولاً");
+          setLoading(false);
+          return;
+        }
+        if (!resetOtpSent) {
+          await forgotPassword(email);
+          setResetOtpSent(true);
+          toast.success("تم إرسال رمز التحقق إلى بريدك الإلكتروني");
+          setLoading(false);
+          return;
+        }
+        if (!otp.trim()) {
+          setError("اكتب رمز التحقق");
+          setLoading(false);
+          return;
+        }
+        if (!resetPasswordValue || resetPasswordValue.length < 6) {
+          setError("كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل");
+          setLoading(false);
+          return;
+        }
+        if (resetPasswordValue !== resetPasswordConfirm) {
+          setError("تأكيد كلمة المرور غير مطابق");
+          setLoading(false);
+          return;
+        }
+        await resetPassword(email, otp.trim(), resetPasswordValue);
+        toast.success("تم تحديث كلمة المرور بنجاح");
+        setForgotMode(false);
+        setResetOtpSent(false);
+        setOtp("");
+        setResetPasswordValue("");
+        setResetPasswordConfirm("");
+        setLoading(false);
+        return;
+      }
+
       if (tab === "login") {
-        await login(email, password);
+        const data = await login(email, password, otpRequired ? otp.trim() : "");
+        if (data?.otp_required) {
+          setOtpRequired(true);
+          toast.success("تم إرسال رمز التحقق إلى بريدك الإلكتروني");
+          setLoading(false);
+          return;
+        }
       } else {
         if (!acceptedTerms) {
           setError("يجب الموافقة على الشروط والأحكام قبل التسجيل");
           setLoading(false);
           return;
         }
-        await register({ email, password, username, act, accepted_terms: true });
+        const data = await register({
+          email,
+          password,
+          username,
+          act,
+          accepted_terms: true,
+          otp: otpRequired ? otp.trim() : undefined,
+          referral_code: referralCode || undefined,
+        });
+        if (data?.otp_required) {
+          setOtpRequired(true);
+          toast.success("تم إرسال رمز التحقق إلى بريدك الإلكتروني");
+          setLoading(false);
+          return;
+        }
       }
       toast.success("مرحباً بك في Rivals");
+      setOtp("");
+      setOtpRequired(false);
       navigate("/");
     } catch (err) {
       const msg = formatApiErrorDetail(err.response?.data?.detail) || err.message;
@@ -68,7 +146,10 @@ export default function AuthPage() {
             <div className="grid grid-cols-2 items-center bg-gradient-to-l from-surface/95 via-surface to-background/90 border border-royalGold-500/20 rounded-2xl p-1.5 shadow-[0_6px_30px_rgba(0,0,0,0.35)] backdrop-blur-sm">
               <button
                 data-testid="tab-login"
-                onClick={() => setTab("login")}
+                onClick={() => {
+                  setTab("login");
+                  resetFlowState();
+                }}
                 className={`py-2.5 rounded-xl text-sm inline-flex items-center justify-center gap-2 transition-all duration-200 border ${
                   tab === "login"
                     ? "bg-gradient-to-l from-royalGold-700 via-royalGold-600 to-royalGold-500 text-white font-extrabold border-royalGold-300/40 shadow-[0_0_15px_rgba(203,213,225,0.22)]"
@@ -79,7 +160,10 @@ export default function AuthPage() {
               </button>
               <button
                 data-testid="tab-register"
-                onClick={() => setTab("register")}
+                onClick={() => {
+                  setTab("register");
+                  resetFlowState();
+                }}
                 className={`py-2.5 rounded-xl text-sm inline-flex items-center justify-center gap-2 transition-all duration-200 border ${
                   tab === "register"
                     ? "bg-gradient-to-l from-royalGold-700 via-royalGold-600 to-royalGold-500 text-white font-extrabold border-royalGold-300/40 shadow-[0_0_15px_rgba(203,213,225,0.22)]"
@@ -93,7 +177,7 @@ export default function AuthPage() {
           </div>
 
           <form onSubmit={submit} className="mt-6 space-y-4" data-testid="auth-form">
-            {tab === "register" && (
+            {!forgotMode && tab === "register" && (
               <div>
                 <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
                   اسم المستخدم
@@ -109,7 +193,7 @@ export default function AuthPage() {
                 />
               </div>
             )}
-            {tab === "register" && (
+            {!forgotMode && tab === "register" && (
               <div>
                 <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
                   Activision ID (داخل اللعبة)
@@ -141,21 +225,94 @@ export default function AuthPage() {
                 placeholder="you@rivals.gg"
               />
             </div>
-            <div>
-              <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
-                كلمة المرور
-              </label>
-              <input
-                data-testid="input-password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                minLength={6}
-                className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
-                placeholder="••••••••"
-              />
-            </div>
+            {!forgotMode && (
+              <div>
+                <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
+                  كلمة المرور
+                </label>
+                <input
+                  data-testid="input-password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  minLength={6}
+                  className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
+                  placeholder="••••••••"
+                />
+              </div>
+            )}
+
+            {forgotMode && (
+              <>
+                {resetOtpSent && (
+                  <div>
+                    <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
+                      رمز التحقق (OTP)
+                    </label>
+                    <input
+                      data-testid="input-reset-otp"
+                      value={otp}
+                      onChange={(e) => setOtp(e.target.value)}
+                      required
+                      className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
+                      placeholder="000000"
+                    />
+                  </div>
+                )}
+                {resetOtpSent && (
+                  <>
+                    <div>
+                      <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
+                        كلمة المرور الجديدة
+                      </label>
+                      <input
+                        data-testid="input-new-password"
+                        type="password"
+                        value={resetPasswordValue}
+                        onChange={(e) => setResetPasswordValue(e.target.value)}
+                        required
+                        minLength={6}
+                        className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
+                        placeholder="••••••••"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
+                        تأكيد كلمة المرور
+                      </label>
+                      <input
+                        data-testid="input-new-password-confirm"
+                        type="password"
+                        value={resetPasswordConfirm}
+                        onChange={(e) => setResetPasswordConfirm(e.target.value)}
+                        required
+                        minLength={6}
+                        className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
+                        placeholder="••••••••"
+                      />
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            {!forgotMode && otpRequired && (
+              <div>
+                <label className="text-xs uppercase tracking-widest text-white/50 mb-2 block">
+                  رمز التحقق (OTP)
+                </label>
+                <input
+                  data-testid="input-otp"
+                  value={otp}
+                  onChange={(e) => setOtp(e.target.value)}
+                  required
+                  className="w-full bg-surface border b-soft rounded-md px-4 py-3 outline-none focus:border-gold-500/50 placeholder-white/30"
+                  placeholder="000000"
+                />
+                <div className="text-[10px] text-white/40 mt-1">أدخل الرمز الذي تم إرساله إلى بريدك الإلكتروني</div>
+              </div>
+            )}
 
             {error && (
               <div data-testid="auth-error" className="text-sm text-destructive border border-destructive/30 rounded-md p-3 bg-destructive/10">
@@ -163,7 +320,13 @@ export default function AuthPage() {
               </div>
             )}
 
-            {tab === "register" && (
+            {!forgotMode && tab === "register" && (
+              <div className="text-[11px] text-emerald-300/90 border border-emerald-500/25 bg-emerald-500/10 rounded-md px-3 py-2">
+                {referralCode ? `تم تطبيق كود الإحالة: ${referralCode}` : "يمكنك التسجيل عبر رابط إحالة لكسب داعيك مكافأة RIV"}
+              </div>
+            )}
+
+            {!forgotMode && tab === "register" && (
               <label className="flex items-start gap-2 cursor-pointer text-xs text-white/70" data-testid="terms-label">
                 <input
                   data-testid="accept-terms"
@@ -187,26 +350,42 @@ export default function AuthPage() {
               disabled={loading}
               className="w-full py-3 rounded-md bg-gold-500 text-black font-bold hover:bg-gold-400 disabled:opacity-50 transition-colors"
             >
-              {loading ? "..." : tab === "login" ? "دخول" : "إنشاء الحساب"}
+              {loading
+                ? "..."
+                : forgotMode
+                  ? (resetOtpSent ? "تحديث كلمة المرور" : "إرسال رمز الاستعادة")
+                  : (otpRequired ? "تحقق من الرمز" : (tab === "login" ? "دخول" : "إنشاء الحساب"))}
             </button>
 
-            {tab === "login" && (
+            {tab === "login" && !otpRequired && !forgotMode && (
               <button
                 data-testid="forgot-password-btn"
                 type="button"
-                onClick={async () => {
-                  if (!email) { setError("اكتب بريدك الإلكتروني أولاً"); return; }
-                  try {
-                    const apiMod = await import("../api");
-                    await apiMod.default.post("/auth/forgot-password", { email });
-                    toast.success("تم إرسال طلب استعادة كلمة المرور. سيتواصل معك المنظم قريباً.");
-                  } catch (err) {
-                    setError(err.response?.data?.detail || "فشل الإرسال");
-                  }
+                onClick={() => {
+                  setForgotMode(true);
+                  setResetOtpSent(false);
+                  setOtp("");
                 }}
                 className="w-full text-xs text-gold-500/80 hover:text-gold-500 underline-offset-4 hover:underline"
               >
                 نسيت كلمة المرور؟
+              </button>
+            )}
+
+            {forgotMode && (
+              <button
+                data-testid="cancel-forgot-password-btn"
+                type="button"
+                onClick={() => {
+                  setForgotMode(false);
+                  setResetOtpSent(false);
+                  setOtp("");
+                  setResetPasswordValue("");
+                  setResetPasswordConfirm("");
+                }}
+                className="w-full text-xs text-white/50 hover:text-white/80 underline-offset-4 hover:underline"
+              >
+                إلغاء استعادة كلمة المرور
               </button>
             )}
           </form>

@@ -8,6 +8,9 @@
   - `MONGO_URI` (or `MONGO_URL`)
   - `DB_NAME`
   - optional: `DISCORD_WELCOME_CHANNEL_ID`, `DISCORD_SUPPORT_ROLE_ID`, `DISCORD_TICKET_CATEGORY_ID`, `DISCORD_LEVEL_ROLE_MAP`
+  - optional: `DISCORD_NEWS_CHANNEL_ID`, `DISCORD_NEWS_BACKLOG_HOURS`, `DISCORD_STAFF_ROLE_IDS`
+  - optional: `DISCORD_WELCOME_BANNER_URL` (صورة بانر رسالة الترحيب)
+  - optional: `DISCORD_WELCOME_WEBSITE_URL` و `DISCORD_WELCOME_RULES_URL` (أزرار روابط في رسالة الترحيب)
   - optional: `DISCORD_TICKET_PANEL_BANNER_GIF_URL`
 
 Then run:
@@ -26,6 +29,9 @@ Then run:
 - Publish panel with:
   - Prefix command: `!ticketpanel`
   - Slash command: `/tickets_panel`
+- News diagnostics:
+  - Slash command: `/news_test` (staff only) to verify posting to configured news channel
+  - Slash command: `/welcome_test` (staff only) to verify welcome channel posting
 - Created tickets are private channels with strict overwrites:
   - `@everyone`: no view
   - ticket creator: view/send

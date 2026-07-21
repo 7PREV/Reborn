@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import api, { formatApiErrorDetail } from "../api";
 import { useAuth } from "../AuthContext";
-import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search, Edit3, Mail, KeyRound, X, Zap, Plus, Image as ImageIcon, Gamepad2, Power } from "lucide-react";
+import { AlertCircle, ScrollText, Trophy, Shield, Sparkles, Crown, UserCheck, UserX, Search, Edit3, Mail, KeyRound, X, Zap, Plus, Image as ImageIcon, Gamepad2, Power, Bot, ShieldAlert, Download, Trash2, Ban } from "lucide-react";
 import { toast } from "sonner";
 import BannerManager from "../components/admin/BannerManager";
 
@@ -831,6 +831,196 @@ function OwnerPlusGrants() {
   );
 }
 
+function SanadAnalyticsPanel() {
+  const [data, setData] = useState({
+    total_questions: 0,
+    questions_today: 0,
+    top_users: [],
+    top_matches: [],
+    latest_questions: [],
+  });
+
+  const load = useCallback(async () => {
+    try {
+      const { data } = await api.get("/admin/sanad-analytics");
+      setData({
+        total_questions: Number(data?.total_questions || 0),
+        questions_today: Number(data?.questions_today || 0),
+        top_users: Array.isArray(data?.top_users) ? data.top_users : [],
+        top_matches: Array.isArray(data?.top_matches) ? data.top_matches : [],
+        latest_questions: Array.isArray(data?.latest_questions) ? data.latest_questions : [],
+      });
+    } catch {
+      setData({
+        total_questions: 0,
+        questions_today: 0,
+        top_users: [],
+        top_matches: [],
+        latest_questions: [],
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return (
+    <section className="bg-surface border b-soft rounded-xl p-5">
+      <h2 className="font-display font-black text-2xl mb-4 flex items-center gap-2">
+        <Bot className="text-emerald-400" /> تحليلات سند
+      </h2>
+
+      <div className="grid sm:grid-cols-2 gap-3 mb-4">
+        <div className="rounded-md border b-soft bg-background p-3">
+          <div className="text-[10px] uppercase tracking-widest text-white/45">إجمالي الأسئلة</div>
+          <div className="text-2xl font-black text-emerald-300">{data.total_questions}</div>
+        </div>
+        <div className="rounded-md border b-soft bg-background p-3">
+          <div className="text-[10px] uppercase tracking-widest text-white/45">اليوم</div>
+          <div className="text-2xl font-black text-emerald-300">{data.questions_today}</div>
+        </div>
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-4">
+        <div className="rounded-md border b-soft bg-background p-3">
+          <div className="text-xs text-white/60 mb-2">أكثر اللاعبين سؤالاً</div>
+          <div className="space-y-1">
+            {data.top_users.length === 0 && <div className="text-xs text-white/40">لا بيانات بعد</div>}
+            {data.top_users.map((u) => (
+              <div key={u.user_id} className="flex items-center justify-between text-sm">
+                <span className="truncate">{u.username || u.user_id}</span>
+                <span className="text-emerald-300 font-bold">{u.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-md border b-soft bg-background p-3">
+          <div className="text-xs text-white/60 mb-2">أكثر المباريات تفاعلاً مع سند</div>
+          <div className="space-y-1">
+            {data.top_matches.length === 0 && <div className="text-xs text-white/40">لا بيانات بعد</div>}
+            {data.top_matches.map((m) => (
+              <div key={m.match_id} className="flex items-center justify-between text-sm">
+                <span className="truncate">{m.match_id}</span>
+                <span className="text-emerald-300 font-bold">{m.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-md border b-soft bg-background p-3">
+        <div className="text-xs text-white/60 mb-2">آخر الأسئلة</div>
+        <div className="space-y-2 max-h-56 overflow-y-auto">
+          {data.latest_questions.length === 0 && <div className="text-xs text-white/40">لا أسئلة مسجلة</div>}
+          {data.latest_questions.map((q, idx) => (
+            <div key={`${q.created_at}-${idx}`} className="text-xs border-b border-white/5 pb-2">
+              <div className="text-white/80">{q.asked_by_username || "-"} • {q.match_id || "-"}</div>
+              <div className="text-white/50 mt-0.5 line-clamp-2">{q.question || ""}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function GuardAlertsPanel() {
+  const [alerts, setAlerts] = useState([]);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const { data } = await api.get("/admin/guard/alerts");
+      setAlerts(Array.isArray(data) ? data : []);
+    } catch {
+      setAlerts([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const cleanup = async (id) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.delete(`/admin/guard/alerts/${id}`);
+      toast.success("تم حذف ملف الإثبات");
+      load();
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const hwidBan = async (hwid) => {
+    if (!hwid) return toast.error("لا يوجد HWID في هذا التنبيه");
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.post("/admin/guard/hwid-ban", {
+        hwid_hash: hwid,
+        reason: "Manual admin action from Rivals Guard dashboard",
+      });
+      toast.success("تم تطبيق HWID Ban");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="bg-surface border b-soft rounded-xl p-5">
+      <h2 className="font-display font-black text-2xl mb-4 flex items-center gap-2 text-destructive">
+        <ShieldAlert size={20} /> Rivals Guard Red Alerts
+      </h2>
+
+      <div className="space-y-2 max-h-[420px] overflow-y-auto">
+        {alerts.map((a) => (
+          <div key={a.id} className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
+            <div className="flex items-center justify-between gap-2">
+              <div className="font-bold text-white truncate">{a.title || "Rivals Guard Alert"}</div>
+              <span className="text-[10px] uppercase tracking-widest text-destructive">{a.severity || "high"}</span>
+            </div>
+            <div className="text-xs text-white/60 mt-1">Match: {a.match_id} • Reporter: {a.reporter_username || "-"}</div>
+            <div className="text-xs text-white/75 mt-2 line-clamp-3">{a.description || "لا يوجد وصف"}</div>
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              <a
+                href={`${process.env.REACT_APP_BACKEND_URL || "http://localhost:8000"}${a.zip_url}`}
+                target="_blank"
+                rel="noreferrer"
+                className="px-2 py-1 rounded bg-white/10 hover:bg-white/15 text-xs flex items-center gap-1"
+              >
+                <Download size={12} /> Download Zip
+              </a>
+              <button
+                onClick={() => hwidBan(a.hwid_hash || "")}
+                className="px-2 py-1 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 text-xs flex items-center gap-1"
+              >
+                <Ban size={12} /> HWID Ban
+              </button>
+              <button
+                onClick={() => cleanup(a.id)}
+                className="px-2 py-1 rounded bg-destructive/20 text-destructive hover:bg-destructive/30 text-xs flex items-center gap-1"
+              >
+                <Trash2 size={12} /> Cleanup
+              </button>
+            </div>
+          </div>
+        ))}
+        {alerts.length === 0 && (
+          <div className="text-xs text-white/45">لا توجد تنبيهات Guard حالياً.</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function AdminPage() {
   const { user } = useAuth();
   const [live, setLive] = useState([]);
@@ -934,6 +1124,8 @@ export default function AdminPage() {
       <UserRoleManager />
       <LeaguesManager />
       <OwnerPlusGrants />
+      <SanadAnalyticsPanel />
+      <GuardAlertsPanel />
       <ClanEditor />
       <PasswordResetsPanel />
       <BannerManager />

@@ -8,24 +8,33 @@ load_dotenv(ROOT_DIR.parent / '.env', override=False)
 import os
 import re
 import uuid
+import string
 import asyncio
 import logging
+import secrets
+import smtplib
 import base64
 import io
 import time
+import json
+import ipaddress
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
+from urllib.request import urlopen, Request as UrlRequest
+from zoneinfo import ZoneInfo
+from email.mime.text import MIMEText
 
 from PIL import Image as PILImage
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Query, Form
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Query, Form, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 from pydantic import BaseModel, Field, EmailStr
 
 # ---------------- Setup ----------------
@@ -64,6 +73,24 @@ CLAN_PLUS_REWARD_THRESHOLD = 6       # Founders Plus unlock once clan reaches ex
 CHALLENGE_MIN_MEMBERS = 6            # Clan must have ≥6 members to challenge / accept
 PERSONAL_PLUS_TRIAL_DAYS = 3         # Free trial granted at registration
 PRAYER_BREAK_USER_COOLDOWN_MIN = 30  # 30 min anti-spam cooldown on prayer-break button
+OTP_TTL_MINUTES = int((os.environ.get("OTP_TTL_MINUTES") or "10").strip() or 10)
+OTP_MAX_ATTEMPTS = int((os.environ.get("OTP_MAX_ATTEMPTS") or "5").strip() or 5)
+ONE_ACCOUNT_PER_IP_ENABLED = (os.environ.get("ONE_ACCOUNT_PER_IP_ENABLED") or "true").strip().lower() not in {"0", "false", "no", "off"}
+ANTI_VPN_BLOCK_ENABLED = (os.environ.get("ANTI_VPN_BLOCK_ENABLED") or "true").strip().lower() not in {"0", "false", "no", "off"}
+PRAYER_ALERT_WINDOW_SECONDS = 15 * 60
+GUARD_HEARTBEAT_STALE_SECONDS = 90
+GUARD_ALERT_MAX_BYTES = 24 * 1024 * 1024
+REFERRAL_REWARD_RIV_POINTS = 1
+RIV_COST_PERSON_PLUS = 11
+RIV_COST_CLAN_PLUS = 27
+
+NOTIFICATION_TYPE_GENERAL = "general"
+NOTIFICATION_TYPE_CLAN_INVITE = "clan_invite"
+NOTIFICATION_TYPE_CLAN_CHALLENGE = "clan_challenge"
+NOTIFICATION_ACTIONABLE_TYPES = {NOTIFICATION_TYPE_CLAN_INVITE, NOTIFICATION_TYPE_CLAN_CHALLENGE}
+ATTENDANCE_RETENTION_ALERT_TEXT = "🎮 وينك عن اخوياك؟ كلانك ياولد بدأ يحضر للبطولة و محتاجين نجمهم ادخل الصفحة واضغط زر التحضير ولا تخليهم يلعبون ناقصين.🏆"
+ATTENDANCE_RETENTION_INACTIVE_HOURS = 72
+ATTENDANCE_RETENTION_COOLDOWN_HOURS = 24
 
 app = FastAPI(title="Rivals Esports API")
 api = APIRouter(prefix="/api")
@@ -84,6 +111,7 @@ _metrics_global = {
     "rate_limited_total": 0,
 }
 _rate_limit_store: dict[str, list[float]] = {}
+_prayer_time_cache: dict[str, dict] = {}
 
 
 @app.middleware("http")
@@ -124,6 +152,130 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _is_public_ip(ip: str) -> bool:
+    try:
+        ip_obj = ipaddress.ip_address((ip or "").strip())
+        return not (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_reserved
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_unspecified
+        )
+    except Exception:
+        return False
+
+
+def _fetch_ip_profile_sync(ip: str) -> dict:
+    # Uses ip-api.com free endpoint for coarse geolocation + proxy/hosting flags.
+    # For non-public/local IPs, returns a safe local profile and no block signal.
+    if not _is_public_ip(ip):
+        return {
+            "ip": ip,
+            "city": "",
+            "region": "",
+            "country": "",
+            "proxy": False,
+            "hosting": False,
+            "mobile": False,
+            "vpn_blocked": False,
+            "source": "local",
+        }
+    fields = "status,message,country,regionName,city,proxy,hosting,mobile,query"
+    url = f"http://ip-api.com/json/{ip}?fields={fields}"
+    req = UrlRequest(url, headers={"User-Agent": "rivals-security/1.0"})
+    with urlopen(req, timeout=3.5) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    ok = (payload or {}).get("status") == "success"
+    city = (payload.get("city") or "").strip() if ok else ""
+    region = (payload.get("regionName") or "").strip() if ok else ""
+    country = (payload.get("country") or "").strip() if ok else ""
+    proxy = bool(payload.get("proxy")) if ok else False
+    hosting = bool(payload.get("hosting")) if ok else False
+    mobile = bool(payload.get("mobile")) if ok else False
+    vpn_blocked = bool(proxy or hosting)
+    return {
+        "ip": ip,
+        "city": city,
+        "region": region,
+        "country": country,
+        "proxy": proxy,
+        "hosting": hosting,
+        "mobile": mobile,
+        "vpn_blocked": vpn_blocked,
+        "source": "ip-api",
+    }
+
+
+async def _resolve_ip_profile(ip: str) -> dict:
+    try:
+        return await asyncio.to_thread(_fetch_ip_profile_sync, ip)
+    except Exception as exc:
+        logger.warning("IP profile lookup failed for %s: %s", ip, exc)
+        return {
+            "ip": ip,
+            "city": "",
+            "region": "",
+            "country": "",
+            "proxy": False,
+            "hosting": False,
+            "mobile": False,
+            "vpn_blocked": False,
+            "source": "fallback",
+        }
+
+
+def _prayer_name_ar(name_en: str) -> str:
+    m = {
+        "Fajr": "الفجر",
+        "Dhuhr": "الظهر",
+        "Asr": "العصر",
+        "Maghrib": "المغرب",
+        "Isha": "العشاء",
+    }
+    return m.get(name_en, name_en)
+
+
+def _fetch_prayer_snapshot_sync(city: str, country: str) -> Optional[dict]:
+    city = (city or "").strip()
+    country = (country or "").strip() or "Saudi Arabia"
+    if not city:
+        return None
+    key = f"{city.lower()}::{country.lower()}"
+    cached = _prayer_time_cache.get(key)
+    if cached and cached.get("expires_at") and cached["expires_at"] > time.time():
+        return cached.get("data")
+
+    params = urlencode({"city": city, "country": country, "method": 4})
+    req = UrlRequest(
+        f"https://api.aladhan.com/v1/timingsByCity?{params}",
+        headers={"User-Agent": "rivals-prayer/1.0"},
+    )
+    with urlopen(req, timeout=4.0) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    data = (payload or {}).get("data") or {}
+    timings = data.get("timings") or {}
+    tz = ((data.get("meta") or {}).get("timezone") or "Asia/Riyadh").strip()
+    out = {
+        "city": city,
+        "country": country,
+        "timezone": tz,
+        "timings": {k: str(v).split(" ")[0] for k, v in timings.items()},
+        "fetched_at": iso(now_utc()),
+    }
+    _prayer_time_cache[key] = {"data": out, "expires_at": time.time() + 60 * 30}
+    return out
+
+
+async def _fetch_prayer_snapshot(city: str, country: str) -> Optional[dict]:
+    try:
+        return await asyncio.to_thread(_fetch_prayer_snapshot_sync, city, country)
+    except Exception as exc:
+        logger.warning("Prayer API lookup failed for %s/%s: %s", city, country, exc)
+        return None
+
+
 def _rate_limit_or_429(request: Request, scope: str, limit: int, window_seconds: int) -> None:
     now_ts = time.time()
     bucket_key = f"{scope}:{_client_ip(request)}"
@@ -138,25 +290,379 @@ def _rate_limit_or_429(request: Request, scope: str, limit: int, window_seconds:
     _rate_limit_store[bucket_key] = history
 
 
+def _smtp_config() -> dict:
+    host = (
+        (os.environ.get("SMTP_HOST") or "").strip()
+        or (os.environ.get("EMAIL_HOST") or "").strip()
+        or (os.environ.get("EMAIL_SMTP_HOST") or "").strip()
+        or (os.environ.get("GMAIL_SMTP_HOST") or "").strip()
+        or "smtp.gmail.com"
+    )
+    port_raw = (
+        (os.environ.get("SMTP_PORT") or "").strip()
+        or (os.environ.get("EMAIL_PORT") or "").strip()
+        or (os.environ.get("EMAIL_SMTP_PORT") or "").strip()
+        or (os.environ.get("GMAIL_SMTP_PORT") or "").strip()
+        or "587"
+    )
+    try:
+        port = int(port_raw)
+    except Exception:
+        port = 587
+
+    username = (
+        (os.environ.get("SMTP_USERNAME") or "").strip()
+        or (os.environ.get("SMTP_USER") or "").strip()
+        or (os.environ.get("EMAIL_USER") or "").strip()
+        or (os.environ.get("EMAIL_SMTP_USER") or "").strip()
+        or (os.environ.get("GMAIL_SMTP_USER") or "").strip()
+        or (os.environ.get("GMAIL_EMAIL") or "").strip()
+    )
+    password = (
+        (os.environ.get("SMTP_PASSWORD") or "").strip()
+        or (os.environ.get("SMTP_PASS") or "").strip()
+        or (os.environ.get("EMAIL_PASSWORD") or "").strip()
+        or (os.environ.get("EMAIL_PASS") or "").strip()
+        or (os.environ.get("EMAIL_SMTP_PASS") or "").strip()
+        or (os.environ.get("GMAIL_SMTP_PASS") or "").strip()
+        or (os.environ.get("GMAIL_APP_PASSWORD") or "").strip()
+    )
+    from_email = (
+        (os.environ.get("SMTP_FROM") or "").strip()
+        or (os.environ.get("EMAIL_FROM") or "").strip()
+        or username
+        or (os.environ.get("OWNER_EMAIL") or "").strip()
+    )
+    use_starttls_raw = (os.environ.get("SMTP_USE_STARTTLS") or "true").strip().lower()
+    if not (os.environ.get("SMTP_USE_STARTTLS") or "").strip():
+        use_starttls_raw = (os.environ.get("EMAIL_USE_STARTTLS") or use_starttls_raw).strip().lower()
+    use_starttls = use_starttls_raw not in {"0", "false", "no", "off"}
+    return {
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "from_email": from_email,
+        "use_starttls": use_starttls,
+    }
+
+
+def _smtp_is_configured(cfg: dict) -> bool:
+    return bool(cfg.get("host") and cfg.get("username") and cfg.get("password") and cfg.get("from_email"))
+
+
+def _mask_email(email: str) -> str:
+    e = (email or "").strip()
+    if "@" not in e:
+        return "***"
+    name, domain = e.split("@", 1)
+    if len(name) <= 2:
+        return f"{name[:1]}***@{domain}"
+    return f"{name[:2]}***{name[-1]}@{domain}"
+
+
+def _otp_label(purpose: str) -> str:
+    labels = {
+        "register": "تأكيد إنشاء الحساب",
+        "login": "تأكيد تسجيل الدخول",
+        "reset_password": "إعادة تعيين كلمة المرور",
+    }
+    return labels.get(purpose, "تأكيد الهوية")
+
+
+def _send_email_sync(to_email: str, subject: str, body: str) -> None:
+    cfg = _smtp_config()
+    if not _smtp_is_configured(cfg):
+        raise RuntimeError("SMTP is not configured")
+
+    msg = MIMEText(body, _subtype="plain", _charset="utf-8")
+    msg["Subject"] = subject
+    msg["From"] = cfg["from_email"]
+    msg["To"] = to_email
+
+    with smtplib.SMTP(cfg["host"], cfg["port"], timeout=20) as server:
+        if cfg.get("use_starttls"):
+            server.starttls()
+        server.login(cfg["username"], cfg["password"])
+        server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+
+
+async def _send_otp_email(to_email: str, purpose: str, code: str) -> None:
+    label = _otp_label(purpose)
+    subject = f"RIVALS OTP - {label}"
+    body = (
+        f"رمز التحقق الخاص بك: {code}\n"
+        f"الاستخدام: {label}\n"
+        f"صلاحية الرمز: {OTP_TTL_MINUTES} دقائق\n\n"
+        "إذا لم تطلب هذا الرمز، تجاهل الرسالة."
+    )
+    try:
+        await asyncio.to_thread(_send_email_sync, to_email, subject, body)
+    except Exception as exc:
+        logger.error("Failed to send OTP email to %s: %s", to_email, exc)
+        raise HTTPException(500, "تعذر إرسال رمز التحقق عبر البريد")
+
+
+async def _create_email_otp(purpose: str, email: str, payload: Optional[dict] = None, user_id: str = "") -> dict:
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    now = now_utc()
+
+    await db.email_otps.update_many(
+        {"purpose": purpose, "email": email, "status": "pending"},
+        {"$set": {"status": "replaced", "updated_at": iso(now)}},
+    )
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "purpose": purpose,
+        "email": email,
+        "user_id": user_id,
+        "payload": payload or {},
+        "code_hash": hash_pw(code),
+        "attempts": 0,
+        "status": "pending",
+        "created_at": iso(now),
+        "updated_at": iso(now),
+        "expires_at": iso(now + timedelta(minutes=max(1, OTP_TTL_MINUTES))),
+        "used_at": None,
+    }
+    await db.email_otps.insert_one(doc)
+    await _send_otp_email(email, purpose, code)
+    return doc
+
+
+async def _verify_email_otp(purpose: str, email: str, otp: str, user_id: str = "") -> dict:
+    doc = await db.email_otps.find_one(
+        {"purpose": purpose, "email": email, "status": "pending"},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if not doc:
+        raise HTTPException(400, "رمز التحقق غير صالح")
+
+    if user_id and (doc.get("user_id") or "") and doc.get("user_id") != user_id:
+        raise HTTPException(400, "رمز التحقق غير صالح")
+
+    try:
+        if datetime.fromisoformat(doc.get("expires_at", "")) <= now_utc():
+            await db.email_otps.update_one(
+                {"id": doc["id"]},
+                {"$set": {"status": "expired", "updated_at": iso(now_utc())}},
+            )
+            raise HTTPException(400, "انتهت صلاحية رمز التحقق")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "رمز التحقق غير صالح")
+
+    if int(doc.get("attempts") or 0) >= max(1, OTP_MAX_ATTEMPTS):
+        await db.email_otps.update_one(
+            {"id": doc["id"]},
+            {"$set": {"status": "blocked", "updated_at": iso(now_utc())}},
+        )
+        raise HTTPException(400, "تم تجاوز عدد المحاولات المسموح")
+
+    if not verify_pw((otp or "").strip(), doc.get("code_hash") or ""):
+        attempts = int(doc.get("attempts") or 0) + 1
+        status = "blocked" if attempts >= max(1, OTP_MAX_ATTEMPTS) else "pending"
+        await db.email_otps.update_one(
+            {"id": doc["id"]},
+            {"$set": {"attempts": attempts, "status": status, "updated_at": iso(now_utc())}},
+        )
+        raise HTTPException(400, "رمز التحقق غير صحيح")
+
+    await db.email_otps.update_one(
+        {"id": doc["id"]},
+        {"$set": {"status": "verified", "used_at": iso(now_utc()), "updated_at": iso(now_utc())}},
+    )
+    return doc
+
+
 async def _create_notification(
     user_id: str,
     title: str,
     body: str,
     kind: str = "system",
+    sender_id: str = "",
+    n_type: str = NOTIFICATION_TYPE_GENERAL,
+    status: str = "pending",
+    message: Optional[str] = None,
     data: Optional[dict] = None,
 ) -> dict:
+    now_iso = iso(now_utc())
+    clean_sender = (sender_id or "").strip()
+    clean_type = (n_type or NOTIFICATION_TYPE_GENERAL).strip()
+    clean_status = (status or "pending").strip() or "pending"
+    clean_message = (message if isinstance(message, str) and message.strip() else body)[:1200]
     doc = {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
+        "sender_id": clean_sender,
+        "type": clean_type,
+        "status": clean_status,
+        "message": clean_message,
         "kind": kind,
         "title": title[:180],
         "body": body[:1200],
         "data": data or {},
         "read_at": None,
-        "created_at": iso(now_utc()),
+        "created_at": now_iso,
+        "updated_at": now_iso,
     }
     await db.notifications.insert_one(doc)
     return doc
+
+
+async def _generate_unique_referral_code() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    for _ in range(30):
+        code = "".join(secrets.choice(alphabet) for _ in range(8))
+        if not await db.users.find_one({"referral_code": code}, {"_id": 0, "id": 1}):
+            return code
+    return f"RIV{uuid.uuid4().hex[:9].upper()}"
+
+
+async def _resolve_referrer_from_code(code: str) -> Optional[dict]:
+    clean = (code or "").strip().upper()
+    if not clean:
+        return None
+    return await db.users.find_one({"referral_code": clean}, {"_id": 0, "id": 1, "username": 1})
+
+
+def _safe_iso_to_dt(raw: Optional[str], fallback: datetime) -> datetime:
+    if not raw:
+        return fallback
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return fallback
+
+
+async def _extend_person_plus_for_user(user_id: str, months: int = 1) -> Optional[str]:
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "personal_plus_until": 1, "premium_until": 1})
+    if not user:
+        return None
+    now = now_utc()
+    person_base = max(now, _safe_iso_to_dt(user.get("personal_plus_until"), now))
+    premium_base = max(now, _safe_iso_to_dt(user.get("premium_until"), now))
+    new_personal = person_base + timedelta(days=30 * max(1, months))
+    new_premium = premium_base + timedelta(days=30 * max(1, months))
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"personal_plus_until": iso(new_personal), "premium_until": iso(new_premium)}},
+    )
+    return iso(new_personal)
+
+
+async def _extend_clan_plus_for_user(user_id: str, months: int = 1) -> Optional[str]:
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "plus_expires_at": 1, "premium_until": 1})
+    if not user:
+        return None
+    now = now_utc()
+    plus_base = max(now, _safe_iso_to_dt(user.get("plus_expires_at"), now))
+    premium_base = max(now, _safe_iso_to_dt(user.get("premium_until"), now))
+    new_plus = plus_base + timedelta(days=30 * max(1, months))
+    new_premium = premium_base + timedelta(days=30 * max(1, months))
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"plus_expires_at": iso(new_plus), "premium_until": iso(new_premium)}},
+    )
+    return iso(new_plus)
+
+
+def _is_actionable_notification(n: dict) -> bool:
+    n_type = (n.get("type") or "").strip()
+    status = (n.get("status") or "").strip().lower()
+    return n_type in NOTIFICATION_ACTIONABLE_TYPES and status == "pending"
+
+
+def _normalize_notification(n: dict) -> dict:
+    n_type = (n.get("type") or NOTIFICATION_TYPE_GENERAL).strip() or NOTIFICATION_TYPE_GENERAL
+    message = (n.get("message") or n.get("body") or "").strip()
+    status = (n.get("status") or "pending").strip() or "pending"
+    if n.get("read_at") and status == "pending" and n_type not in NOTIFICATION_ACTIONABLE_TYPES:
+        status = "read"
+    channel = "actionable" if _is_actionable_notification({**n, "status": status, "type": n_type}) else "general"
+    out = {
+        **n,
+        "type": n_type,
+        "status": status,
+        "message": message,
+        "channel": channel,
+        "actionable": channel == "actionable",
+    }
+    out.pop("_id", None)
+    return out
+
+
+async def _send_attendance_retention_alerts() -> int:
+    now = now_utc()
+    stale_before = now - timedelta(hours=ATTENDANCE_RETENTION_INACTIVE_HOURS)
+    sent = 0
+    async for u in db.users.find(
+        {"clan_id": {"$nin": [None, ""]}},
+        {"_id": 0, "id": 1, "clan_id": 1},
+    ):
+        user_id = (u.get("id") or "").strip()
+        clan_id = (u.get("clan_id") or "").strip()
+        if not user_id or not clan_id:
+            continue
+
+        att_doc = await db.clan_attendance.find_one(
+            {"clan_id": clan_id},
+            {"_id": 0, "last_interaction_at": 1},
+        )
+        last_map = (att_doc or {}).get("last_interaction_at") or {}
+        last_raw = (last_map.get(user_id) or "").strip()
+
+        last_dt = None
+        if last_raw:
+            try:
+                last_dt = datetime.fromisoformat(last_raw)
+            except Exception:
+                last_dt = None
+        if last_dt and last_dt > stale_before:
+            continue
+
+        recent_cutoff = iso(now - timedelta(hours=ATTENDANCE_RETENTION_COOLDOWN_HOURS))
+        recent = await db.notifications.find_one(
+            {
+                "user_id": user_id,
+                "kind": "attendance_retention",
+                "created_at": {"$gte": recent_cutoff},
+            },
+            {"_id": 0, "id": 1},
+        )
+        if recent:
+            continue
+
+        await _create_notification(
+            user_id=user_id,
+            sender_id=clan_id,
+            n_type=NOTIFICATION_TYPE_GENERAL,
+            status="pending",
+            kind="attendance_retention",
+            title="تذكير التحضير",
+            body=ATTENDANCE_RETENTION_ALERT_TEXT,
+            message=ATTENDANCE_RETENTION_ALERT_TEXT,
+            data={
+                "route": f"/clans/{clan_id}?highlight_checkin=1",
+                "highlight": "checkin",
+            },
+        )
+        sent += 1
+    if sent:
+        logger.info("Attendance retention alerts sent: %s", sent)
+    return sent
+
+
+async def _attendance_retention_loop() -> None:
+    while True:
+        try:
+            await _send_attendance_retention_alerts()
+        except Exception as exc:
+            logger.error("Attendance retention loop error: %s", exc)
+        await asyncio.sleep(24 * 3600)
 
 
 async def _audit_admin_action(
@@ -334,9 +840,11 @@ def sanitize_user(u: dict) -> dict:
         "email": u["email"],
         "username": u["username"],
         "act": u.get("act", ""),
+        "gaming_platform": u.get("gaming_platform", "pc"),
         "act_changed_at": u.get("act_changed_at"),
         "role": u.get("role", "player"),
         "discord_id": u.get("discord_id"),
+        "discord_username": u.get("discord_username", ""),
         "clan_id": u.get("clan_id"),
         "points": u.get("points", 0),
         "wins": wins,
@@ -350,6 +858,9 @@ def sanitize_user(u: dict) -> dict:
         "is_plus": user_is_plus(u),
         "is_personal_plus": user_is_personal_plus(u),
         "isPlusSubscriber": user_is_plus_subscriber(u),
+        "referral_code": u.get("referral_code", ""),
+        "riv_points": int(u.get("riv_points", 0) or 0),
+        "premium_until": u.get("premium_until"),
         "personal_plus_until": u.get("personal_plus_until"),
         "plus_expires_at": u.get("plus_expires_at"),
         "clan_cooldown_until": u.get("clan_cooldown_until"),
@@ -357,6 +868,8 @@ def sanitize_user(u: dict) -> dict:
         "kick_url": u.get("kick_url", ""),
         "youtube_url": u.get("youtube_url", ""),
         "tiktok_url": u.get("tiktok_url", ""),
+        "instagram_link": u.get("instagram_link", ""),
+        "x_link": u.get("x_link", ""),
         "last_seen_at": last_seen,
         "is_online": is_online,
         "prayer_break_cooldown_until": u.get("prayer_break_cooldown_until"),
@@ -466,8 +979,25 @@ async def _create_news_post(kind: str, title: str, body: str = "", payload: Opti
         "created_by": created_by,
         "created_by_role": created_by_role,
         "created_at": iso(now_utc()),
+        "discord_status": "queued",
+        "discord_updated_at": iso(now_utc()),
     }
     await db.news_posts.insert_one(doc)
+    try:
+        await _enqueue_discord_job(
+            "news_post",
+            {
+                "news_id": doc["id"],
+                "kind": doc["kind"],
+                "title": doc["title"],
+                "body": doc["body"],
+                "payload": doc["payload"],
+            },
+            dedupe_key=f"news_post:{doc['id']}",
+            priority=30,
+        )
+    except Exception as exc:
+        logger.warning("Discord enqueue failed (news_post:%s): %s", doc["id"], exc)
     doc.pop("_id", None)
     return doc
 
@@ -555,7 +1085,7 @@ def _assert_clan_can_match(clan: dict) -> None:
         raise HTTPException(400, f"الكلان يحتاج {CHALLENGE_MIN_MEMBERS} لاعبين على الأقل لخوض المباريات ({members}/{CHALLENGE_MIN_MEMBERS})")
 
 
-CLAN_LEAVE_COOLDOWN_HOURS = 2
+CLAN_LEAVE_COOLDOWN_HOURS = 3
 
 
 def _cooldown_remaining_seconds(user: dict) -> int:
@@ -712,14 +1242,23 @@ class RegisterIn(BaseModel):
     password: str = Field(min_length=6, max_length=128)
     act: str = Field(min_length=2, max_length=40)  # In-game COD name
     accepted_terms: bool = False
+    otp: Optional[str] = None
+    referral_code: Optional[str] = None
 
 
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+    otp: Optional[str] = None
     csrf_token: Optional[str] = None
     recaptcha_token: Optional[str] = None
     cf_turnstile_response: Optional[str] = None
+
+
+class ResetPasswordIn(BaseModel):
+    email: EmailStr
+    otp: str = Field(min_length=4, max_length=12)
+    new_password: str = Field(min_length=6, max_length=128)
 
 
 class AuthRevokeIn(BaseModel):
@@ -727,10 +1266,11 @@ class AuthRevokeIn(BaseModel):
 
 
 class BillingCheckoutIn(BaseModel):
-    plan: Literal["plus_monthly", "plus_yearly"] = "plus_monthly"
-    provider: Optional[Literal["stripe", "myfatoorah", "manual"]] = "stripe"
+    plan: Literal["plus_monthly", "plus_yearly", "person_plus", "clan_plus"] = "plus_monthly"
+    provider: Optional[Literal["stripe", "myfatoorah", "manual", "riv_points"]] = "stripe"
     success_url: Optional[str] = ""
     cancel_url: Optional[str] = ""
+    pay_with_riv_points: bool = False
 
 
 class BillingWebhookIn(BaseModel):
@@ -752,6 +1292,11 @@ class ClanCreateIn(BaseModel):
 
 class InviteIn(BaseModel):
     user_id: str
+
+
+class ContractOfferIn(BaseModel):
+    user_id: str
+    terms: Optional[str] = ""
 
 
 class HandleRequestIn(BaseModel):
@@ -809,10 +1354,14 @@ class RuleIn(BaseModel):
 
 
 class ProfileUpdateIn(BaseModel):
+    gaming_platform: Optional[Literal["pc", "ps5", "xbox", "console"]] = None
+    discord_username: Optional[str] = None
     twitch_url: Optional[str] = ""
     kick_url: Optional[str] = ""
     youtube_url: Optional[str] = ""
     tiktok_url: Optional[str] = ""
+    instagram_link: Optional[str] = ""
+    x_link: Optional[str] = ""
     act: Optional[str] = None
     avatar: Optional[str] = None        # base64 data URL (≤2MB) — Personal Plus only
     banner: Optional[str] = None        # base64 data URL (≤3MB) — Personal Plus only
@@ -852,6 +1401,24 @@ class AdminClanEditIn(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=40)
     tag: Optional[str] = Field(default=None, min_length=2, max_length=8)
     description: Optional[str] = None
+
+
+class GuardConnectIn(BaseModel):
+    match_id: str
+    platform: Optional[Literal["pc", "ps5", "xbox", "console"]] = "pc"
+    session_token: Optional[str] = None
+    app_version: Optional[str] = ""
+    hwid_hash: Optional[str] = ""
+
+
+class GuardHeartbeatIn(BaseModel):
+    match_id: str
+    session_token: Optional[str] = None
+
+
+class GuardHwidBanIn(BaseModel):
+    hwid_hash: str = Field(min_length=8, max_length=200)
+    reason: Optional[str] = ""
 
 
 class ClanSuspendIn(BaseModel):
@@ -977,10 +1544,36 @@ async def _cleanup_removed_clan_customization_fields() -> None:
         logger.warning("Clan customization cleanup skipped: %s", exc)
 
 
+async def _ensure_referral_fields_for_existing_users() -> None:
+    await db.users.update_many(
+        {"riv_points": {"$exists": False}},
+        {"$set": {"riv_points": 0}},
+    )
+    await db.users.update_many(
+        {"premium_until": {"$exists": False}},
+        {"$set": {"premium_until": None}},
+    )
+    cursor = db.users.find(
+        {
+            "$or": [
+                {"referral_code": {"$exists": False}},
+                {"referral_code": None},
+                {"referral_code": ""},
+            ]
+        },
+        {"_id": 0, "id": 1},
+    )
+    async for u in cursor:
+        code = await _generate_unique_referral_code()
+        await db.users.update_one({"id": u["id"]}, {"$set": {"referral_code": code}})
+
+
 @app.on_event("startup")
 async def startup() -> None:
     await db.users.create_index("email", unique=True)
     await db.users.create_index("username")
+    await db.users.create_index("registration_ip")
+    await db.users.create_index([("registration_city", 1), ("registration_country", 1)])
     await db.clans.create_index("name", unique=True)
     await db.clans.create_index("tag", unique=True)
     await db.matches.create_index("status")
@@ -996,6 +1589,11 @@ async def startup() -> None:
     await db.billing_events.create_index([("created_at", -1)])
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.notifications.create_index([("user_id", 1), ("read_at", 1)])
+    await db.notifications.create_index([("user_id", 1), ("type", 1), ("status", 1), ("created_at", -1)])
+    await db.notifications.create_index([("kind", 1), ("created_at", -1)])
+    await db.referrals.create_index([("referred_id", 1)], unique=True)
+    await db.referrals.create_index([("referrer_id", 1), ("created_at", -1)])
+    await db.system_jobs.create_index([("job", 1), ("period", 1)], unique=True)
     await db.audit_log.create_index([("created_at", -1)])
     await db.audit_log.create_index([("actor_id", 1), ("created_at", -1)])
     await db.discord_ticket_categories.create_index("id", unique=True)
@@ -1003,8 +1601,23 @@ async def startup() -> None:
     await db.discord_tickets.create_index("id", unique=True)
     await db.discord_tickets.create_index([("guild_id", 1), ("channel_id", 1)], unique=True)
     await db.discord_tickets.create_index([("guild_id", 1), ("creator_discord_id", 1), ("status", 1), ("created_at", -1)])
+    await db.email_otps.create_index([("purpose", 1), ("email", 1), ("status", 1), ("created_at", -1)])
+    await db.email_otps.create_index([("expires_at", 1)])
+    await db.sanad_questions.create_index([("created_at", -1)])
+    await db.sanad_questions.create_index([("match_id", 1), ("created_at", -1)])
+    await db.guard_sessions.create_index([("match_id", 1), ("user_id", 1)], unique=True)
+    await db.guard_sessions.create_index([("last_seen_at", -1)])
+    await db.guard_alerts.create_index([("match_id", 1), ("created_at", -1)])
+    await db.guard_alerts.create_index([("created_at", -1)])
+    await db.guard_hwid_bans.create_index([("hwid_hash", 1)], unique=True)
+
+    await db.users.update_many(
+        {"gaming_platform": {"$exists": False}},
+        {"$set": {"gaming_platform": "pc"}},
+    )
 
     await _cleanup_removed_clan_customization_fields()
+    await _ensure_referral_fields_for_existing_users()
 
     # Seed admin/owner from env only (no insecure hardcoded defaults)
     admin_email = (os.environ.get("ADMIN_EMAIL") or "").strip().lower()
@@ -1017,6 +1630,9 @@ async def startup() -> None:
                 "email": admin_email,
                 "username": "Admin",
                 "password_hash": hash_pw(admin_pw),
+                "referral_code": await _generate_unique_referral_code(),
+                "riv_points": 0,
+                "premium_until": None,
                 "role": "admin",
                 "points": 0,
                 "clan_id": None,
@@ -1044,6 +1660,9 @@ async def startup() -> None:
                 "email": owner_email,
                 "username": owner_username,
                 "password_hash": hash_pw(owner_pw),
+                "referral_code": await _generate_unique_referral_code(),
+                "riv_points": 0,
+                "premium_until": None,
                 "role": "owner",
                 "points": 0,
                 "clan_id": None,
@@ -1093,6 +1712,10 @@ async def startup() -> None:
     asyncio.create_task(_periodic_cleanup_loop())
     # Start monthly league rotation loop
     asyncio.create_task(_league_rotation_loop())
+    # Start daily retention reminders for clan attendance inactivity
+    asyncio.create_task(_attendance_retention_loop())
+    # Start monthly hall-of-fame evaluator (runs at last day 23:59)
+    asyncio.create_task(_monthly_hall_of_fame_loop())
 
 
 @app.on_event("shutdown")
@@ -1107,16 +1730,77 @@ async def register(body: RegisterIn, request: Request, response: Response):
     if not body.accepted_terms:
         raise HTTPException(400, "يجب الموافقة على الشروط والأحكام وسياسة الخصوصية قبل التسجيل")
     email = body.email.lower()
+    referral_code = (
+        (request.query_params.get("ref") or "").strip()
+        or (body.referral_code or "").strip()
+    ).upper()
+    current_ip = _client_ip(request)
+    ip_profile = await _resolve_ip_profile(current_ip)
+
+    if ANTI_VPN_BLOCK_ENABLED and ip_profile.get("vpn_blocked"):
+        raise HTTPException(400, "عذراً، لا يُسمح باستخدام VPN/Proxy أثناء التسجيل.")
+
+    if ONE_ACCOUNT_PER_IP_ENABLED and _is_public_ip(current_ip):
+        existing_on_ip = await db.users.find_one(
+            {"registration_ip": current_ip},
+            {"_id": 0, "id": 1},
+        )
+        if existing_on_ip:
+            raise HTTPException(400, "عذراً، يُسمح بإنشاء حساب واحد فقط لكل شبكة/جهاز!")
+    if not (body.otp or "").strip():
+        if await db.users.find_one({"email": email}):
+            raise HTTPException(400, "البريد مسجل من قبل")
+        if await db.users.find_one({"username": body.username}):
+            raise HTTPException(400, "اسم المستخدم محجوز")
+
+        valid_referral_code = ""
+        if referral_code:
+            referrer = await _resolve_referrer_from_code(referral_code)
+            if referrer:
+                valid_referral_code = referral_code
+
+        await _create_email_otp(
+            purpose="register",
+            email=email,
+            payload={
+                "username": body.username,
+                "act": body.act.strip(),
+                "password_hash": hash_pw(body.password),
+                "accepted_terms": True,
+                "referral_code": valid_referral_code,
+            },
+        )
+        return {
+            "ok": True,
+            "otp_required": True,
+            "message": "تم إرسال رمز التحقق إلى بريدك الإلكتروني",
+            "email_hint": _mask_email(email),
+        }
+
+    otp_doc = await _verify_email_otp("register", email, body.otp or "")
+    payload = otp_doc.get("payload") or {}
+    username = (payload.get("username") or body.username or "").strip()
+    act = (payload.get("act") or body.act or "").strip()
+    password_hash = (payload.get("password_hash") or "").strip()
+    referral_code = ((payload.get("referral_code") or referral_code or "").strip() or "").upper()
+
+    if not username or not act or not password_hash:
+        raise HTTPException(400, "بيانات التسجيل غير مكتملة، أعد طلب رمز جديد")
     if await db.users.find_one({"email": email}):
         raise HTTPException(400, "البريد مسجل من قبل")
-    if await db.users.find_one({"username": body.username}):
+    if await db.users.find_one({"username": username}):
         raise HTTPException(400, "اسم المستخدم محجوز")
+
     user = {
         "id": str(uuid.uuid4()),
         "email": email,
-        "username": body.username,
-        "act": body.act.strip(),
-        "password_hash": hash_pw(body.password),
+        "username": username,
+        "act": act,
+        "gaming_platform": "pc",
+        "password_hash": password_hash,
+        "referral_code": await _generate_unique_referral_code(),
+        "riv_points": 0,
+        "premium_until": None,
         "role": "player",
         "points": 0,
         "wins": 0,
@@ -1135,9 +1819,51 @@ async def register(body: RegisterIn, request: Request, response: Response):
         "is_plus": False,
         "personal_plus_until": iso(now_utc() + timedelta(days=PERSONAL_PLUS_TRIAL_DAYS)),
         "clan_cooldown_until": None,
+        "email_verified_at": iso(now_utc()),
+        "registration_ip": current_ip,
+        "registration_city": ip_profile.get("city", ""),
+        "registration_region": ip_profile.get("region", ""),
+        "registration_country": ip_profile.get("country", ""),
         "created_at": iso(now_utc()),
     }
     await db.users.insert_one(user)
+
+    if referral_code:
+        referrer = await db.users.find_one(
+            {"referral_code": referral_code},
+            {"_id": 0, "id": 1, "username": 1, "registration_ip": 1},
+        )
+        if referrer and referrer.get("id") != user["id"]:
+            referrer_ip = (referrer.get("registration_ip") or "").strip()
+            ip_conflict = bool(current_ip and referrer_ip and current_ip == referrer_ip)
+            if ip_conflict:
+                logger.warning("Referral blocked by anti-cheat (same IP): referrer=%s referred=%s ip=%s", referrer.get("id"), user["id"], current_ip)
+
+            existing_ref = await db.referrals.find_one({"referred_id": user["id"]}, {"_id": 0, "id": 1})
+            if (not existing_ref) and (not ip_conflict) and user.get("email_verified_at"):
+                await db.referrals.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "referrer_id": referrer["id"],
+                    "referred_id": user["id"],
+                    "referred_ip": current_ip,
+                    "created_at": iso(now_utc()),
+                })
+                await db.users.update_one(
+                    {"id": referrer["id"]},
+                    {"$inc": {"riv_points": REFERRAL_REWARD_RIV_POINTS}},
+                )
+                await _create_notification(
+                    user_id=referrer["id"],
+                    sender_id=user["id"],
+                    n_type=NOTIFICATION_TYPE_GENERAL,
+                    status="pending",
+                    kind="referral_reward",
+                    title="مكافأة دعوة جديدة",
+                    body=f"تمت دعوتك بنجاح! حصلت على +{REFERRAL_REWARD_RIV_POINTS} RIV.",
+                    message=f"تمت دعوتك بنجاح! حصلت على +{REFERRAL_REWARD_RIV_POINTS} RIV.",
+                    data={"route": "/me"},
+                )
+
     session = await _create_auth_session(user["id"], request)
     token = make_token(user["id"], user["email"], user["role"], session_id=session["id"])
     refresh_token = make_refresh_token(user["id"], session["id"])
@@ -1171,6 +1897,23 @@ async def login(body: LoginIn, request: Request, response: Response):
     if not user or not verify_pw(body.password, user["password_hash"]):
         raise HTTPException(401, "البريد أو كلمة المرور غير صحيحة")
     await _enforce_ban_guard(user)
+
+    if not (body.otp or "").strip():
+        await _create_email_otp(
+            purpose="login",
+            email=email,
+            payload={"user_id": user["id"]},
+            user_id=user["id"],
+        )
+        return {
+            "ok": True,
+            "otp_required": True,
+            "message": "تم إرسال رمز تحقق لتأكيد تسجيل الدخول",
+            "email_hint": _mask_email(email),
+        }
+
+    await _verify_email_otp("login", email, body.otp or "", user_id=user["id"])
+
     session = await _create_auth_session(user["id"], request)
     token = make_token(user["id"], user["email"], user["role"], session_id=session["id"])
     refresh_token = make_refresh_token(user["id"], session["id"])
@@ -1308,6 +2051,24 @@ async def me(user: dict = Depends(get_current_user)):
     return await _resolve_avatar_render_for_user(user)
 
 
+@api.get("/me/referrals")
+async def my_referrals(user: dict = Depends(get_current_user)):
+    referral_code = (user.get("referral_code") or "").strip()
+    if not referral_code:
+        referral_code = await _generate_unique_referral_code()
+        await db.users.update_one({"id": user["id"]}, {"$set": {"referral_code": referral_code}})
+    invited_count = await db.referrals.count_documents({"referrer_id": user["id"]})
+    base_url = (os.environ.get("PUBLIC_APP_URL") or "https://rivalsesports.games").rstrip("/")
+    referral_link = f"{base_url}/auth?ref={referral_code}"
+    return {
+        "referral_code": referral_code,
+        "referral_link": referral_link,
+        "riv_points": int(user.get("riv_points", 0) or 0),
+        "invited_count": int(invited_count),
+        "reward_per_invite": REFERRAL_REWARD_RIV_POINTS,
+    }
+
+
 @api.post("/me/plus")
 async def toggle_plus(user: dict = Depends(get_current_user)):
     """Toggle Plus subscription (free during preview)."""
@@ -1368,7 +2129,55 @@ async def billing_subscription_status(user: dict = Depends(get_current_user)):
 
 @api.post("/billing/checkout")
 async def billing_checkout_stub(body: BillingCheckoutIn, user: dict = Depends(get_current_user)):
-    """Stub endpoint: prepares a checkout intent record for later payment-gateway integration."""
+    """Checkout endpoint.
+    - Supports gateway intent stubs (legacy behavior)
+    - Supports RIV points purchases for Person Plus / Clan Plus
+    """
+    use_riv_points = bool(body.pay_with_riv_points or body.provider == "riv_points")
+    if use_riv_points:
+        if body.plan not in ("person_plus", "clan_plus"):
+            raise HTTPException(400, "الدفع بالنقاط متاح فقط لباقات Person Plus و Clan Plus")
+
+        cost = RIV_COST_PERSON_PLUS if body.plan == "person_plus" else RIV_COST_CLAN_PLUS
+        balance = int(user.get("riv_points", 0) or 0)
+        if balance < cost:
+            raise HTTPException(400, "رصيد RIV غير كافٍ")
+
+        new_expiry = None
+        if body.plan == "person_plus":
+            new_expiry = await _extend_person_plus_for_user(user["id"], months=1)
+        else:
+            new_expiry = await _extend_clan_plus_for_user(user["id"], months=1)
+
+        await db.users.update_one({"id": user["id"]}, {"$inc": {"riv_points": -cost}})
+
+        event = {
+            "id": str(uuid.uuid4()),
+            "type": "riv_points_checkout",
+            "user_id": user["id"],
+            "plan": body.plan,
+            "provider": "riv_points",
+            "status": "paid",
+            "riv_cost": cost,
+            "created_at": iso(now_utc()),
+        }
+        await db.billing_events.insert_one(event)
+
+        fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "riv_points": 1, "personal_plus_until": 1, "plus_expires_at": 1, "premium_until": 1})
+        return {
+            "ok": True,
+            "provider": "riv_points",
+            "status": "paid",
+            "plan": body.plan,
+            "riv_cost": cost,
+            "riv_points": int((fresh or {}).get("riv_points", 0) or 0),
+            "new_expiry": new_expiry,
+            "premium_until": (fresh or {}).get("premium_until"),
+            "personal_plus_until": (fresh or {}).get("personal_plus_until"),
+            "plus_expires_at": (fresh or {}).get("plus_expires_at"),
+        }
+
+    # Legacy checkout intent stub for gateway integrations
     checkout_id = str(uuid.uuid4())
     intent = {
         "id": checkout_id,
@@ -1411,6 +2220,7 @@ async def billing_webhook_stub(body: BillingWebhookIn, request: Request):
 
 @api.get("/notifications")
 async def list_notifications(
+    tab: str = "all",
     unread_only: bool = False,
     limit: int = 40,
     user: dict = Depends(get_current_user),
@@ -1419,10 +2229,16 @@ async def list_notifications(
     query = {"user_id": user["id"]}
     if unread_only:
         query["read_at"] = None
+    tab_clean = (tab or "all").strip().lower()
+    if tab_clean == "actionable":
+        query["type"] = {"$in": list(NOTIFICATION_ACTIONABLE_TYPES)}
+    elif tab_clean == "general":
+        query["type"] = {"$nin": list(NOTIFICATION_ACTIONABLE_TYPES)}
     docs = await db.notifications.find(query, {"_id": 0}).sort("created_at", -1).to_list(safe_limit)
     unread_count = await db.notifications.count_documents({"user_id": user["id"], "read_at": None})
+    items = [_normalize_notification(d) for d in docs]
     return {
-        "items": docs,
+        "items": items,
         "unread_count": unread_count,
     }
 
@@ -1433,7 +2249,16 @@ async def mark_notifications_read(body: NotificationReadIn, user: dict = Depends
     if body.mark_all:
         res = await db.notifications.update_many(
             {"user_id": user["id"], "read_at": None},
-            {"$set": {"read_at": now_iso}},
+            {"$set": {"read_at": now_iso, "updated_at": now_iso}},
+        )
+        await db.notifications.update_many(
+            {
+                "user_id": user["id"],
+                "read_at": {"$ne": None},
+                "type": {"$nin": list(NOTIFICATION_ACTIONABLE_TYPES)},
+                "status": "pending",
+            },
+            {"$set": {"status": "read", "updated_at": now_iso}},
         )
         unread_count = await db.notifications.count_documents({"user_id": user["id"], "read_at": None})
         return {"ok": True, "updated": int(res.modified_count), "unread_count": unread_count}
@@ -1444,7 +2269,17 @@ async def mark_notifications_read(body: NotificationReadIn, user: dict = Depends
 
     res = await db.notifications.update_many(
         {"user_id": user["id"], "id": {"$in": ids}, "read_at": None},
-        {"$set": {"read_at": now_iso}},
+        {"$set": {"read_at": now_iso, "updated_at": now_iso}},
+    )
+    await db.notifications.update_many(
+        {
+            "user_id": user["id"],
+            "id": {"$in": ids},
+            "type": {"$nin": list(NOTIFICATION_ACTIONABLE_TYPES)},
+            "status": "pending",
+            "read_at": {"$ne": None},
+        },
+        {"$set": {"status": "read", "updated_at": now_iso}},
     )
     unread_count = await db.notifications.count_documents({"user_id": user["id"], "read_at": None})
     return {"ok": True, "updated": int(res.modified_count), "unread_count": unread_count}
@@ -1898,11 +2733,16 @@ async def attendance_checkin(clan_id: str, user: dict = Depends(get_current_user
     clan = await _get_clan(clan_id)
     if user.get("clan_id") != clan_id or user["id"] not in clan.get("member_ids", []):
         raise HTTPException(403, "فقط أعضاء الكلان يمكنهم التحضير")
+    now_iso = iso(now_utc())
     await db.clan_attendance.update_one(
         {"clan_id": clan_id},
         {
             "$addToSet": {"checked_in_ids": user["id"]},
-            "$set": {"updated_at": iso(now_utc())},
+            "$push": {"attendance_events": {"user_id": user["id"], "action": "checkin", "at": now_iso}},
+            "$set": {
+                "updated_at": now_iso,
+                f"last_interaction_at.{user['id']}": now_iso,
+            },
         },
         upsert=True,
     )
@@ -1915,11 +2755,15 @@ async def attendance_checkout(clan_id: str, user: dict = Depends(get_current_use
     clan = await _get_clan(clan_id)
     if user.get("clan_id") != clan_id or user["id"] not in clan.get("member_ids", []):
         raise HTTPException(403, "فقط أعضاء الكلان يمكنهم تعديل التحضير")
+    now_iso = iso(now_utc())
     await db.clan_attendance.update_one(
         {"clan_id": clan_id},
         {
             "$pull": {"checked_in_ids": user["id"]},
-            "$set": {"updated_at": iso(now_utc())},
+            "$set": {
+                "updated_at": now_iso,
+                f"last_interaction_at.{user['id']}": now_iso,
+            },
         },
         upsert=True,
     )
@@ -2061,14 +2905,105 @@ async def invite_player(clan_id: str, body: InviteIn, user: dict = Depends(get_c
         "created_at": iso(now_utc()),
     }
     await db.join_requests.insert_one(inv)
+    invite_msg = f"📩 عرض تعاقد رسمي! يرغب كلان {clan['name']} بانضمامك لصفوفه كلاعب محترف."
+    await _create_notification(
+        user_id=body.user_id,
+        sender_id=clan_id,
+        n_type=NOTIFICATION_TYPE_CLAN_INVITE,
+        status="pending",
+        kind="clan_invite",
+        title="دعوة كلان",
+        body=invite_msg,
+        message=invite_msg,
+        data={
+            "join_request_id": inv["id"],
+            "clan_id": clan_id,
+            "clan_name": clan.get("name", ""),
+            "route": f"/clans/{clan_id}",
+        },
+    )
     inv.pop("_id", None)
     return inv
+
+
+@api.post("/clans/{clan_id}/contract-offer")
+async def offer_contract_to_free_agent(clan_id: str, body: ContractOfferIn, user: dict = Depends(get_current_user)):
+    clan = await _get_clan(clan_id)
+    if not _is_clan_staff(clan, user):
+        raise HTTPException(403, "فقط قادة الكلان أو النواب")
+    if user.get("clan_id") != clan_id and not is_staff(user):
+        raise HTTPException(403, "هذا ليس كلانك")
+
+    target = await db.users.find_one({"id": body.user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "اللاعب غير موجود")
+    if target.get("clan_id"):
+        raise HTTPException(400, "العرض مخصص للاعبين الأحرار فقط")
+
+    max_members, _ = await _leader_limits(clan)
+    if len(clan.get("member_ids", [])) >= max_members:
+        raise HTTPException(400, "الكلان ممتلئ")
+
+    existing = await db.join_requests.find_one(
+        {
+            "clan_id": clan_id,
+            "user_id": body.user_id,
+            "type": "contract_offer",
+            "status": "pending",
+        },
+        {"_id": 0, "id": 1},
+    )
+    if existing:
+        raise HTTPException(400, "يوجد عرض تعاقد معلّق لهذا اللاعب بالفعل")
+
+    terms = (body.terms or "").strip()
+    invite_doc = {
+        "id": str(uuid.uuid4()),
+        "clan_id": clan_id,
+        "user_id": body.user_id,
+        "username": target.get("username") or "",
+        "status": "pending",
+        "type": "contract_offer",
+        "terms": terms,
+        "created_by": user.get("id"),
+        "created_at": iso(now_utc()),
+    }
+    await db.join_requests.insert_one(invite_doc)
+
+    msg = f"📩 عرض تعاقد رسمي! يرغب كلان {clan['name']} بانضمامك لصفوفه كلاعب محترف."
+    if terms:
+        msg = f"{msg}\n\nالشروط: {terms}"
+
+    notif = await _create_notification(
+        user_id=body.user_id,
+        sender_id=clan_id,
+        n_type=NOTIFICATION_TYPE_CLAN_INVITE,
+        status="pending",
+        kind="contract_offer",
+        title="عرض تعاقد رسمي",
+        body=msg,
+        message=msg,
+        data={
+            "join_request_id": invite_doc["id"],
+            "clan_id": clan_id,
+            "clan_name": clan.get("name", ""),
+            "route": f"/players/{body.user_id}",
+            "terms": terms,
+        },
+    )
+
+    return {
+        "ok": True,
+        "offer_id": invite_doc["id"],
+        "notification_id": notif.get("id"),
+        "status": "pending",
+    }
 
 
 @api.get("/me/invites")
 async def my_invites(user: dict = Depends(get_current_user)):
     invs = await db.join_requests.find(
-        {"user_id": user["id"], "type": "invite", "status": "pending"}, {"_id": 0}
+        {"user_id": user["id"], "type": {"$in": ["invite", "contract_offer"]}, "status": "pending"}, {"_id": 0}
     ).to_list(100)
     for inv in invs:
         clan = await db.clans.find_one({"id": inv["clan_id"]}, {"_id": 0})
@@ -2080,9 +3015,13 @@ async def my_invites(user: dict = Depends(get_current_user)):
 
 @api.post("/invites/{inv_id}")
 async def respond_invite(inv_id: str, body: HandleRequestIn, user: dict = Depends(get_current_user)):
-    inv = await db.join_requests.find_one({"id": inv_id, "user_id": user["id"], "type": "invite"}, {"_id": 0})
+    inv = await db.join_requests.find_one(
+        {"id": inv_id, "user_id": user["id"], "type": {"$in": ["invite", "contract_offer"]}},
+        {"_id": 0},
+    )
     if not inv:
         raise HTTPException(404, "الدعوة غير موجودة")
+    now_iso = iso(now_utc())
     if body.action == "accept" and not user.get("clan_id"):
         old_clan_id = (user.get("clan_id") or "").strip()
         _assert_no_cooldown(user)
@@ -2110,7 +3049,16 @@ async def respond_invite(inv_id: str, body: HandleRequestIn, user: dict = Depend
                 old_joined_at=user.get("last_clan_joined_at"),
                 old_left_at=user.get("last_clan_left_at"),
             )
-    await db.join_requests.update_one({"id": inv_id}, {"$set": {"status": body.action}})
+    await db.join_requests.update_one({"id": inv_id}, {"$set": {"status": body.action, "updated_at": now_iso}})
+    await db.notifications.update_many(
+        {
+            "user_id": user["id"],
+            "type": NOTIFICATION_TYPE_CLAN_INVITE,
+            "status": "pending",
+            "data.join_request_id": inv_id,
+        },
+        {"$set": {"status": "accepted" if body.action == "accept" else "rejected", "read_at": now_iso, "updated_at": now_iso}},
+    )
     return {"ok": True, "reward_granted": bool(locals().get("granted"))}
 
 
@@ -2201,6 +3149,30 @@ async def create_challenge(clan_id: str, body: ChallengeIn, user: dict = Depends
         "match_id": None,
     }
     await db.challenges.insert_one(ch)
+
+    opponent_staff_ids = list(dict.fromkeys([
+        opponent.get("leader_id"),
+        *(opponent.get("vice_leader_ids") or []),
+    ]))
+    challenge_msg = f"⚔️ تحدي جديد! كلان {challenger['name']} يرسل طلباً لتحدي كلانك في مواجهة حاسمة."
+    for uid in [x for x in opponent_staff_ids if x]:
+        await _create_notification(
+            user_id=uid,
+            sender_id=clan_id,
+            n_type=NOTIFICATION_TYPE_CLAN_CHALLENGE,
+            status="pending",
+            kind="clan_challenge",
+            title="تحدي جديد",
+            body=challenge_msg,
+            message=challenge_msg,
+            data={
+                "challenge_id": ch["id"],
+                "challenger_clan_id": clan_id,
+                "challenger_clan_name": challenger.get("name", ""),
+                "route": f"/clans/{opponent['id']}",
+            },
+        )
+
     ch.pop("_id", None)
     return ch
 
@@ -2251,6 +3223,30 @@ async def instant_challenge(target_clan_id: str, user: dict = Depends(get_curren
         "is_instant": True,
     }
     await db.challenges.insert_one(ch)
+
+    target_staff_ids = list(dict.fromkeys([
+        target.get("leader_id"),
+        *(target.get("vice_leader_ids") or []),
+    ]))
+    challenge_msg = f"⚔️ تحدي جديد! كلان {challenger['name']} يرسل طلباً لتحدي كلانك في مواجهة حاسمة."
+    for uid in [x for x in target_staff_ids if x]:
+        await _create_notification(
+            user_id=uid,
+            sender_id=challenger["id"],
+            n_type=NOTIFICATION_TYPE_CLAN_CHALLENGE,
+            status="pending",
+            kind="clan_challenge",
+            title="تحدي جديد",
+            body=challenge_msg,
+            message=challenge_msg,
+            data={
+                "challenge_id": ch["id"],
+                "challenger_clan_id": challenger["id"],
+                "challenger_clan_name": challenger.get("name", ""),
+                "route": f"/clans/{target['id']}",
+            },
+        )
+
     ch.pop("_id", None)
     return ch
 
@@ -2279,8 +3275,33 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
     opponent = await _get_clan(ch["opponent_clan_id"])
     if not _is_clan_staff(opponent, user):
         raise HTTPException(403, "فقط قائد/نائب الكلان الخصم يمكنه الرد")
+    now_iso = iso(now_utc())
     if body.action == "reject":
         await db.challenges.update_one({"id": ch_id}, {"$set": {"status": "rejected"}})
+        await db.notifications.update_many(
+            {
+                "user_id": user["id"],
+                "type": NOTIFICATION_TYPE_CLAN_CHALLENGE,
+                "status": "pending",
+                "data.challenge_id": ch_id,
+            },
+            {"$set": {"status": "rejected", "read_at": now_iso, "updated_at": now_iso}},
+        )
+        challenger = await _get_clan(ch["challenger_clan_id"])
+        challenger_staff = list(dict.fromkeys([challenger.get("leader_id"), *(challenger.get("vice_leader_ids") or [])]))
+        rejected_msg = f"تم رفض التحدي من كلان {opponent['name']}."
+        for uid in [x for x in challenger_staff if x]:
+            await _create_notification(
+                user_id=uid,
+                sender_id=opponent.get("id", ""),
+                n_type=NOTIFICATION_TYPE_GENERAL,
+                status="pending",
+                kind="clan_challenge_result",
+                title="تم رفض التحدي",
+                body=rejected_msg,
+                message=rejected_msg,
+                data={"challenge_id": ch_id, "route": f"/clans/{challenger['id']}"},
+            )
         return {"ok": True, "status": "rejected"}
     # Accept → enforce roster minimum + create live match
     challenger = await _get_clan(ch["challenger_clan_id"])
@@ -2319,6 +3340,7 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
         "finished_at": None,
     }
     await db.matches.insert_one(m)
+    await _post_sanad_welcome(m["id"])
     all_attendees = list({*attendance_a_ids, *attendance_b_ids})
     if all_attendees:
         await db.users.update_many({"id": {"$in": all_attendees}}, {"$inc": {"attendances": 1}})
@@ -2330,6 +3352,31 @@ async def respond_challenge(ch_id: str, body: HandleRequestIn, user: dict = Depe
     await db.challenges.update_one(
         {"id": ch_id}, {"$set": {"status": "accepted", "match_id": m["id"]}}
     )
+    await db.notifications.update_many(
+        {
+            "user_id": user["id"],
+            "type": NOTIFICATION_TYPE_CLAN_CHALLENGE,
+            "status": "pending",
+            "data.challenge_id": ch_id,
+        },
+        {"$set": {"status": "accepted", "read_at": now_iso, "updated_at": now_iso}},
+    )
+
+    challenger_staff = list(dict.fromkeys([challenger.get("leader_id"), *(challenger.get("vice_leader_ids") or [])]))
+    accepted_msg = f"تم قبول التحدي من كلان {opponent['name']}، وتم إنشاء لوبي المباراة."
+    for uid in [x for x in challenger_staff if x]:
+        await _create_notification(
+            user_id=uid,
+            sender_id=opponent.get("id", ""),
+            n_type=NOTIFICATION_TYPE_GENERAL,
+            status="pending",
+            kind="clan_challenge_result",
+            title="تم قبول التحدي",
+            body=accepted_msg,
+            message=accepted_msg,
+            data={"challenge_id": ch_id, "match_id": m["id"], "route": f"/matches/{m['id']}"},
+        )
+
     m.pop("_id", None)
     asyncio.create_task(_send_discord_embed(
         title=f"🔴 Match Started: {ch['challenger_name']} [{ch['challenger_tag']}] vs {ch['opponent_name']} [{ch['opponent_tag']}]",
@@ -2440,12 +3487,178 @@ UPLOAD_DIR = ROOT_DIR / "uploads" / "videos"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 CLAN_LOGO_UPLOAD_DIR = ROOT_DIR / "uploads" / "clan_logos"
 CLAN_LOGO_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+GUARD_UPLOAD_DIR = ROOT_DIR / "uploads" / "guard"
+GUARD_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOADS_DIR = ROOT_DIR / "static" / "downloads"
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 CLAN_LOGO_MAX_BYTES = 2 * 1024 * 1024       # 2 MB for PNG/JPG
 CLAN_LOGO_GIF_MAX_BYTES = 6 * 1024 * 1024   # 6 MB for Plus GIF logos
 
 
 def _unique_ids(items: list) -> list:
     return list(dict.fromkeys([x for x in (items or []) if x]))
+
+
+def _normalize_gaming_platform(value: Optional[str]) -> str:
+    v = (value or "pc").strip().lower()
+    if v in {"ps", "playstation", "ps5"}:
+        return "ps5"
+    if v in {"xbox", "seriesx", "series"}:
+        return "xbox"
+    if v in {"console", "ps5", "xbox"}:
+        return v
+    return "pc"
+
+
+def _guard_session_is_active(session_doc: Optional[dict]) -> bool:
+    if not session_doc:
+        return False
+    if (session_doc.get("status") or "").lower() != "active":
+        return False
+    last_seen_raw = session_doc.get("last_seen_at")
+    if not last_seen_raw:
+        return False
+    try:
+        last_seen_dt = datetime.fromisoformat(last_seen_raw)
+    except Exception:
+        return False
+    return (now_utc() - last_seen_dt).total_seconds() <= GUARD_HEARTBEAT_STALE_SECONDS
+
+
+def _guard_status_badge(platform: str, is_active: bool) -> str:
+    if platform in {"ps5", "xbox", "console"}:
+        return "console_validated"
+    if is_active:
+        return "guard_active"
+    return "guard_inactive"
+
+
+class _GuardPresenceHub:
+    def __init__(self) -> None:
+        self._sockets_by_match: dict[str, set[WebSocket]] = defaultdict(set)
+        self._lock = asyncio.Lock()
+
+    async def connect(self, match_id: str, websocket: WebSocket) -> None:
+        await websocket.accept()
+        async with self._lock:
+            self._sockets_by_match[match_id].add(websocket)
+
+    async def disconnect(self, match_id: str, websocket: WebSocket) -> None:
+        async with self._lock:
+            sockets = self._sockets_by_match.get(match_id)
+            if not sockets:
+                return
+            sockets.discard(websocket)
+            if not sockets:
+                self._sockets_by_match.pop(match_id, None)
+
+    async def broadcast(self, match_id: str, payload: dict) -> None:
+        async with self._lock:
+            sockets = list(self._sockets_by_match.get(match_id, set()))
+        if not sockets:
+            return
+        dead: list[WebSocket] = []
+        for ws in sockets:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        if dead:
+            async with self._lock:
+                current = self._sockets_by_match.get(match_id, set())
+                for ws in dead:
+                    current.discard(ws)
+                if not current:
+                    self._sockets_by_match.pop(match_id, None)
+
+
+_guard_presence_hub = _GuardPresenceHub()
+
+
+async def _resolve_guard_roster(match: dict) -> dict:
+    if not match:
+        return {"players": [], "all_pc_ready": True, "pc_required_count": 0, "pc_ready_count": 0}
+
+    a = await _get_clan(match["clan_a_id"])
+    b = await _get_clan(match["clan_b_id"])
+    side_a_staff = _unique_ids([a.get("leader_id")] + (a.get("vice_leader_ids") or []))
+    side_b_staff = _unique_ids([b.get("leader_id")] + (b.get("vice_leader_ids") or []))
+
+    attendance = _unique_ids((match.get("attendance_a_ids") or []) + (match.get("attendance_b_ids") or []))
+    participant_ids = _unique_ids(attendance + side_a_staff + side_b_staff)
+    if not participant_ids:
+        return {"players": [], "all_pc_ready": True, "pc_required_count": 0, "pc_ready_count": 0}
+
+    users = await db.users.find(
+        {"id": {"$in": participant_ids}},
+        {"_id": 0, "id": 1, "username": 1, "clan_id": 1, "gaming_platform": 1, "act": 1},
+    ).to_list(200)
+    user_map = {u["id"]: u for u in users if u.get("id")}
+
+    sessions = await db.guard_sessions.find(
+        {"match_id": match["id"], "user_id": {"$in": participant_ids}},
+        {"_id": 0},
+    ).to_list(400)
+    latest_session_by_user: dict[str, dict] = {}
+    for sess in sessions:
+        uid = sess.get("user_id")
+        if not uid:
+            continue
+        prev = latest_session_by_user.get(uid)
+        if not prev:
+            latest_session_by_user[uid] = sess
+            continue
+        prev_ts = prev.get("last_seen_at") or ""
+        cur_ts = sess.get("last_seen_at") or ""
+        if cur_ts >= prev_ts:
+            latest_session_by_user[uid] = sess
+
+    players = []
+    pc_required_count = 0
+    pc_ready_count = 0
+    for uid in participant_ids:
+        u = user_map.get(uid)
+        if not u:
+            continue
+        clan_id = u.get("clan_id")
+        side = "A" if clan_id == match.get("clan_a_id") else "B" if clan_id == match.get("clan_b_id") else None
+        platform = _normalize_gaming_platform(u.get("gaming_platform") or "pc")
+        sess = latest_session_by_user.get(uid)
+        active = _guard_session_is_active(sess)
+
+        if platform == "pc":
+            pc_required_count += 1
+            if active:
+                pc_ready_count += 1
+
+        players.append({
+            "user_id": uid,
+            "username": u.get("username") or uid,
+            "side": side,
+            "platform": platform,
+            "status": _guard_status_badge(platform, active),
+            "guard_active": active,
+            "last_seen_at": sess.get("last_seen_at") if sess else None,
+        })
+
+    return {
+        "players": players,
+        "all_pc_ready": pc_ready_count >= pc_required_count,
+        "pc_required_count": pc_required_count,
+        "pc_ready_count": pc_ready_count,
+    }
+
+
+async def _broadcast_guard_status(match_id: str) -> None:
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        return
+    snapshot = await _resolve_guard_roster(match)
+    await _guard_presence_hub.broadcast(match_id, {
+        "event": "guard_status",
+        "match_id": match_id,
+        **snapshot,
+    })
 
 
 def _eligible_attendance_ids(match: dict, side: str) -> list:
@@ -2593,6 +3806,7 @@ async def create_match(body: MatchCreateIn, user: dict = Depends(get_current_use
         "finished_at": None,
     }
     await db.matches.insert_one(m)
+    await _post_sanad_welcome(m["id"])
     all_attendees = list({*attendance_a_ids, *attendance_b_ids})
     if all_attendees:
         await db.users.update_many({"id": {"$in": all_attendees}}, {"$inc": {"attendances": 1}})
@@ -2632,6 +3846,254 @@ async def get_match(match_id: str):
     if not m:
         raise HTTPException(404, "غير موجود")
     return await _enrich_match(m)
+
+
+@api.get("/matches/{match_id}/guard/status")
+async def get_match_guard_status(match_id: str, user: dict = Depends(get_current_user)):
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    is_participant = user.get("clan_id") in (match.get("clan_a_id"), match.get("clan_b_id"))
+    if (not is_participant) and (not is_staff(user)):
+        raise HTTPException(403, "هذه الحالة متاحة لأطراف المباراة والإدارة")
+    snapshot = await _resolve_guard_roster(match)
+    return {
+        "match_id": match_id,
+        **snapshot,
+        "updated_at": iso(now_utc()),
+    }
+
+
+@api.get("/guard/launcher-link/{match_id}")
+async def guard_launcher_link(match_id: str, user: dict = Depends(get_current_user)):
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    is_participant = user.get("clan_id") in (match.get("clan_a_id"), match.get("clan_b_id"))
+    if (not is_participant) and (not is_staff(user)):
+        raise HTTPException(403, "للأطراف المشاركة فقط")
+
+    token = (user.get("guard_session_token") or "").strip()
+    if not token:
+        token = secrets.token_urlsafe(24)
+        await db.users.update_one({"id": user["id"]}, {"$set": {"guard_session_token": token}})
+
+    deep_link = f"rivalsguard://connect?{urlencode({'match_id': match_id, 'token': token})}"
+    return {"ok": True, "uri": deep_link, "session_token": token}
+
+
+@api.post("/guard/session/connect")
+async def guard_session_connect(body: GuardConnectIn, user: dict = Depends(get_current_user)):
+    match = await db.matches.find_one({"id": body.match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    is_participant = user.get("clan_id") in (match.get("clan_a_id"), match.get("clan_b_id"))
+    if (not is_participant) and (not is_staff(user)):
+        raise HTTPException(403, "للأطراف المشاركة فقط")
+
+    platform = _normalize_gaming_platform(body.platform or user.get("gaming_platform") or "pc")
+    hwid_hash = (body.hwid_hash or "").strip()
+    if hwid_hash:
+        banned = await db.guard_hwid_bans.find_one({"hwid_hash": hwid_hash}, {"_id": 0, "id": 1})
+        if banned:
+            raise HTTPException(403, "هذا الجهاز محظور من المنصة")
+
+    expected_token = (user.get("guard_session_token") or "").strip()
+    incoming_token = (body.session_token or "").strip()
+    if expected_token and incoming_token and incoming_token != expected_token:
+        raise HTTPException(403, "رمز الربط غير صالح")
+
+    if not expected_token:
+        expected_token = incoming_token or secrets.token_urlsafe(24)
+        await db.users.update_one({"id": user["id"]}, {"$set": {"guard_session_token": expected_token}})
+
+    now_iso = iso(now_utc())
+    await db.users.update_one({"id": user["id"]}, {"$set": {"gaming_platform": platform}})
+    await db.guard_sessions.update_one(
+        {"match_id": body.match_id, "user_id": user["id"]},
+        {"$set": {
+            "match_id": body.match_id,
+            "user_id": user["id"],
+            "username": user.get("username"),
+            "platform": platform,
+            "status": "active",
+            "session_token": expected_token,
+            "app_version": (body.app_version or "").strip(),
+            "hwid_hash": hwid_hash,
+            "last_seen_at": now_iso,
+            "updated_at": now_iso,
+        }, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now_iso}},
+        upsert=True,
+    )
+    await _broadcast_guard_status(body.match_id)
+    return {"ok": True, "status": "active", "session_token": expected_token}
+
+
+@api.post("/guard/session/heartbeat")
+async def guard_session_heartbeat(body: GuardHeartbeatIn, user: dict = Depends(get_current_user)):
+    match = await db.matches.find_one({"id": body.match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    session = await db.guard_sessions.find_one({"match_id": body.match_id, "user_id": user["id"]}, {"_id": 0})
+    if not session:
+        raise HTTPException(404, "جلسة الحماية غير موجودة")
+    incoming_token = (body.session_token or "").strip()
+    expected_token = (session.get("session_token") or "").strip()
+    if expected_token and incoming_token and incoming_token != expected_token:
+        raise HTTPException(403, "رمز الجلسة غير صحيح")
+
+    await db.guard_sessions.update_one(
+        {"id": session["id"]},
+        {"$set": {"status": "active", "last_seen_at": iso(now_utc()), "updated_at": iso(now_utc())}},
+    )
+    await _broadcast_guard_status(body.match_id)
+    return {"ok": True}
+
+
+@api.post("/guard/session/disconnect")
+async def guard_session_disconnect(body: GuardHeartbeatIn, user: dict = Depends(get_current_user)):
+    await db.guard_sessions.update_one(
+        {"match_id": body.match_id, "user_id": user["id"]},
+        {"$set": {"status": "inactive", "updated_at": iso(now_utc())}},
+    )
+    await _broadcast_guard_status(body.match_id)
+    return {"ok": True}
+
+
+@api.post("/guard/alerts/upload")
+async def guard_alert_upload(
+    match_id: str = Form(...),
+    title: str = Form(""),
+    description: str = Form(""),
+    detection_type: str = Form("unknown"),
+    severity: str = Form("high"),
+    hwid_hash: str = Form(""),
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+    is_participant = user.get("clan_id") in (match.get("clan_a_id"), match.get("clan_b_id"))
+    if (not is_participant) and (not is_staff(user)):
+        raise HTTPException(403, "غير مصرح")
+
+    original_name = (file.filename or "guard_package.zip").strip()
+    if not original_name.lower().endswith(".zip"):
+        raise HTTPException(400, "يجب رفع ملف ZIP فقط")
+
+    saved_name = f"{uuid.uuid4()}.zip"
+    out_path = GUARD_UPLOAD_DIR / saved_name
+    total = 0
+    try:
+        with out_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > GUARD_ALERT_MAX_BYTES:
+                    out.close()
+                    out_path.unlink(missing_ok=True)
+                    raise HTTPException(400, "حجم ملف الإثبات كبير جداً")
+                out.write(chunk)
+    finally:
+        await file.close()
+
+    alert_doc = {
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "reporter_user_id": user["id"],
+        "reporter_username": user.get("username"),
+        "severity": (severity or "high").strip().lower(),
+        "detection_type": (detection_type or "unknown").strip().lower(),
+        "title": (title or "Rivals Guard Alert").strip()[:180],
+        "description": (description or "").strip()[:2000],
+        "hwid_hash": (hwid_hash or "").strip(),
+        "zip_file_name": saved_name,
+        "zip_original_name": original_name,
+        "zip_size": total,
+        "zip_url": f"/api/uploads/guard/{saved_name}",
+        "status": "open",
+        "created_at": iso(now_utc()),
+        "updated_at": iso(now_utc()),
+    }
+    await db.guard_alerts.insert_one(alert_doc)
+
+    admins = await db.users.find({"role": {"$in": ["owner", "admin"]}}, {"_id": 0, "id": 1}).to_list(100)
+    for adm in admins:
+        await _create_notification(
+            user_id=adm["id"],
+            title="🚨 Red Alert: Rivals Guard",
+            body=f"تنبيه أمني في مباراة {match_id} — {alert_doc['title']}",
+            kind="guard_red_alert",
+            data={"match_id": match_id, "alert_id": alert_doc["id"], "severity": alert_doc["severity"]},
+        )
+
+    await _guard_presence_hub.broadcast(match_id, {
+        "event": "guard_red_alert",
+        "match_id": match_id,
+        "alert_id": alert_doc["id"],
+        "title": alert_doc["title"],
+        "severity": alert_doc["severity"],
+        "status": "open",
+    })
+
+    return {"ok": True, "alert_id": alert_doc["id"], "zip_url": alert_doc["zip_url"]}
+
+
+@api.get("/admin/guard/alerts")
+async def admin_guard_alerts(user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    docs = await db.guard_alerts.find({}, {"_id": 0}).sort("created_at", -1).to_list(300)
+    return docs
+
+
+@api.delete("/admin/guard/alerts/{alert_id}")
+async def admin_guard_delete_alert(alert_id: str, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    doc = await db.guard_alerts.find_one({"id": alert_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "غير موجود")
+    zname = (doc.get("zip_file_name") or "").strip()
+    if zname:
+        (GUARD_UPLOAD_DIR / zname).unlink(missing_ok=True)
+    await db.guard_alerts.delete_one({"id": alert_id})
+    return {"ok": True}
+
+
+@api.post("/admin/guard/hwid-ban")
+async def admin_guard_hwid_ban(body: GuardHwidBanIn, user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+    h = (body.hwid_hash or "").strip()
+    await db.guard_hwid_bans.update_one(
+        {"hwid_hash": h},
+        {"$set": {
+            "hwid_hash": h,
+            "reason": (body.reason or "").strip()[:600],
+            "created_by_user_id": user["id"],
+            "created_by_username": user.get("username"),
+            "updated_at": iso(now_utc()),
+        }, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": iso(now_utc())}},
+        upsert=True,
+    )
+    return {"ok": True, "hwid_hash": h}
+
+
+@api.websocket("/ws/matches/{match_id}/guard")
+async def ws_match_guard_status(websocket: WebSocket, match_id: str):
+    await _guard_presence_hub.connect(match_id, websocket)
+    try:
+        await websocket.send_json({"event": "connected", "match_id": match_id})
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await _guard_presence_hub.disconnect(match_id, websocket)
 
 
 @api.get("/matches/{match_id}/mvp-status")
@@ -2749,6 +4211,17 @@ def _is_match_prayer_active(match: dict) -> bool:
         return False
 
 
+async def _assert_guard_ready_for_live_ops(match: dict, user: dict) -> None:
+    if not match or match.get("status") != "live":
+        return
+    if is_staff(user):
+        return
+    snapshot = await _resolve_guard_roster(match)
+    if snapshot.get("all_pc_ready"):
+        return
+    raise HTTPException(423, "لا يمكن بدء/متابعة الجولة حتى تفعيل Rivals Guard لكل لاعبي PC")
+
+
 @api.post("/matches/{match_id}/vote-map")
 async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_current_user)):
     match = await db.matches.find_one({"id": match_id}, {"_id": 0})
@@ -2756,6 +4229,7 @@ async def vote_map(match_id: str, body: MapVoteIn, user: dict = Depends(get_curr
         raise HTTPException(404, "غير موجود")
     if match["status"] != "live":
         raise HTTPException(400, "المباراة منتهية")
+    await _assert_guard_ready_for_live_ops(match, user)
     if _is_match_prayer_active(match):
         raise HTTPException(400, "بريك صلاة جارٍ — استأنف المباراة أولاً")
     if not (0 <= body.map_index < BO_TOTAL):
@@ -2967,6 +4441,7 @@ async def start_grace(match_id: str, map_index: int, user: dict = Depends(get_cu
         raise HTTPException(404, "غير موجود")
     if match["status"] != "live":
         raise HTTPException(400, "المباراة منتهية")
+    await _assert_guard_ready_for_live_ops(match, user)
     if not (0 <= map_index < BO_TOTAL):
         raise HTTPException(400, "رقم ماب غير صحيح")
     mp = match["maps"][map_index]
@@ -2995,6 +4470,7 @@ async def start_prayer(match_id: str, map_index: int, user: dict = Depends(get_c
         raise HTTPException(404, "غير موجود")
     if match["status"] != "live":
         raise HTTPException(400, "المباراة منتهية")
+    await _assert_guard_ready_for_live_ops(match, user)
     if not (0 <= map_index < BO_TOTAL):
         raise HTTPException(400, "رقم ماب غير صحيح")
     mp = match["maps"][map_index]
@@ -3087,6 +4563,8 @@ async def get_chat(match_id: str, user: dict = Depends(get_current_user)):
     m = await db.matches.find_one({"id": match_id}, {"_id": 0})
     if not m:
         raise HTTPException(404, "غير موجود")
+    await _maybe_emit_zikr_alert_for_match(m)
+    m = await db.matches.find_one({"id": match_id}, {"_id": 0})
     is_admin = is_staff(user)
     a = await _get_clan(m["clan_a_id"])
     b = await _get_clan(m["clan_b_id"])
@@ -3107,11 +4585,20 @@ async def get_chat(match_id: str, user: dict = Depends(get_current_user)):
                 filtered.append(copy)
     can_write = is_admin or user["id"] in [a["leader_id"]] + a.get("vice_leader_ids", []) + [b["leader_id"]] + b.get("vice_leader_ids", [])
     user_clan = user.get("clan_id")
+    tactical_banner = None
+    alert = (m or {}).get("zikr_alert") or {}
+    if alert.get("window_ends_at"):
+        try:
+            if datetime.fromisoformat(alert["window_ends_at"]) > now_utc():
+                tactical_banner = alert
+        except Exception:
+            tactical_banner = None
     return {
         "messages": filtered,
         "can_write": can_write,
         "user_clan_id": user_clan,
         "is_admin": is_admin,
+        "tactical_banner": tactical_banner,
     }
 
 
@@ -3150,6 +4637,189 @@ def _build_chat_message(body: ChatMessageIn, user: dict, match_id: str, role: st
     }
 
 
+async def _insert_system_chat_message(match_id: str, text: str, username: str = "النظام") -> None:
+    await db.chat_messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": "system",
+        "username": username,
+        "user_role": "admin" if username == "النظام" else "bot",
+        "user_clan_id": None,
+        "type": "text",
+        "text": text,
+        "image": None,
+        "video": None,
+        "opponent_decision": None,
+        "admin_decision": None,
+        "admin_note": "",
+        "created_at": iso(now_utc()),
+    })
+
+
+async def _post_sanad_welcome(match_id: str) -> None:
+    existing = await db.chat_messages.find_one(
+        {"match_id": match_id, "user_id": "sanad-bot", "kind": "sanad_welcome"},
+        {"_id": 0, "id": 1},
+    )
+    if existing:
+        return
+    await db.chat_messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": "sanad-bot",
+        "username": "سند 🤖",
+        "user_role": "bot",
+        "user_clan_id": None,
+        "type": "text",
+        "kind": "sanad_welcome",
+        "text": "أهلاً بكم يا أبطال! أنا البوت الذكي سند 🤖، أعرف كل تفاصيل المنصة وقوانينها وقادر على مساعدتكم. اكتبوا كلمة (سند) في الشات وسأكون معكم فوراً. أتمنى لكم التوفيق! 🚀",
+        "image": None,
+        "video": None,
+        "opponent_decision": None,
+        "admin_decision": None,
+        "admin_note": "",
+        "created_at": iso(now_utc()),
+    })
+
+
+def _sanad_answer(question: str) -> str:
+    q = (question or "").strip().lower()
+    if any(k in q for k in ["قانون", "rules", "نظام"]):
+        return "📘 القوانين الرسمية موجودة في صفحة القوانين داخل المنصة. التزموا بنتيجة التصويت، واحفظوا لقطات الإثبات عند النزاع."
+    if any(k in q for k in ["بريك", "صلاة", "prayer"]):
+        return "🕌 بريك الصلاة يتفعّل بعد تنبيه ذِكْر فقط، ولفترة 15 دقيقة، ومرة واحدة لكل مباراة مع تأكيد الطرفين."
+    if any(k in q for k in ["نقاط", "points", "ترتيب", "leaderboard"]):
+        return "🏆 الفوز يعطي +3 نقاط، الخسارة -1، والانسحاب -3. الترتيب يتحدث تلقائياً بعد نهاية المباراة."
+    if any(k in q for k in ["شات", "chat", "صورة", "فيديو"]):
+        return "💬 القادة/النواب والمنظمون يقدرون يكتبون في شات المباراة. الوسائط تُراجع حسب النظام قبل اعتمادها عند الحاجة."
+    return "🤖 حاضر! إذا سؤالك عن القوانين، التحديات، شات المباراة، أو نقاط الترتيب، اكتب سؤالك بشكل مختصر وواضح وسأجاوبك فوراً."
+
+
+async def _maybe_handle_sanad_mention(match: dict, user: dict, text: str) -> None:
+    raw = (text or "").strip()
+    if not raw:
+        return
+    lowered = raw.lower()
+    if ("سند" not in raw) and ("sanad" not in lowered):
+        return
+
+    await _send_sanad_reply(match.get("id"), user, raw)
+
+
+async def _send_sanad_reply(match_id: str, user: dict, question: str) -> dict:
+    answer = _sanad_answer(question)
+    await db.sanad_questions.insert_one({
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": user.get("id"),
+        "username": user.get("username"),
+        "question": question,
+        "answer": answer,
+        "created_at": iso(now_utc()),
+    })
+
+    reply = {
+        "id": str(uuid.uuid4()),
+        "match_id": match_id,
+        "user_id": "sanad-bot",
+        "username": "سند 🤖",
+        "user_role": "bot",
+        "user_clan_id": None,
+        "type": "text",
+        "kind": "sanad_reply",
+        "text": answer,
+        "image": None,
+        "video": None,
+        "opponent_decision": None,
+        "admin_decision": None,
+        "admin_note": "",
+        "created_at": iso(now_utc()),
+    }
+    await db.chat_messages.insert_one(reply)
+    return reply
+
+
+async def _maybe_emit_zikr_alert_for_match(match: dict) -> Optional[dict]:
+    if not match or match.get("status") != "live":
+        return None
+    now = now_utc()
+    existing = match.get("zikr_alert") or {}
+    existing_window = existing.get("window_ends_at")
+    if existing_window:
+        try:
+            if datetime.fromisoformat(existing_window) > now:
+                return existing
+        except Exception:
+            pass
+
+    participant_ids = _unique_ids((match.get("attendance_a_ids") or []) + (match.get("attendance_b_ids") or []))
+    if not participant_ids:
+        participant_ids = _unique_ids([match.get("clan_a_id"), match.get("clan_b_id")])
+        clans = await db.clans.find({"id": {"$in": participant_ids}}, {"_id": 0, "leader_id": 1}).to_list(10)
+        participant_ids = _unique_ids([c.get("leader_id") for c in clans])
+    if not participant_ids:
+        return None
+
+    users = await db.users.find(
+        {"id": {"$in": participant_ids}},
+        {"_id": 0, "registration_city": 1, "registration_country": 1},
+    ).to_list(200)
+    seen_locs = []
+    for u in users:
+        city = (u.get("registration_city") or "").strip()
+        country = (u.get("registration_country") or "Saudi Arabia").strip()
+        if city:
+            key = f"{city.lower()}::{country.lower()}"
+            if key not in seen_locs:
+                seen_locs.append(key)
+
+    if not seen_locs:
+        return None
+
+    for loc in seen_locs[:3]:
+        city, country = loc.split("::", 1)
+        snap = await _fetch_prayer_snapshot(city, country)
+        if not snap:
+            continue
+        tz_name = snap.get("timezone") or "Asia/Riyadh"
+        try:
+            local_now = now.astimezone(ZoneInfo(tz_name))
+        except Exception:
+            local_now = now.astimezone(timezone(timedelta(hours=3)))
+        prayer_order = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]
+        timings = snap.get("timings") or {}
+        for p_name in prayer_order:
+            hhmm = (timings.get(p_name) or "").strip()
+            if not re.match(r"^\d{1,2}:\d{2}$", hhmm):
+                continue
+            hh, mm = [int(x) for x in hhmm.split(":", 1)]
+            p_dt = local_now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            elapsed = (local_now - p_dt).total_seconds()
+            if 0 <= elapsed <= PRAYER_ALERT_WINDOW_SECONDS:
+                prayer_ar = _prayer_name_ar(p_name)
+                day_key = local_now.strftime("%Y-%m-%d")
+                announce_key = f"{day_key}:{p_name}:{city}:{country}"
+                if match.get("zikr_last_key") == announce_key:
+                    return match.get("zikr_alert")
+                text = f"﴿وَذَكِّرْ فَإِنَّ الذِّكْرَىٰ تَنفَعُ الْمُؤْمِنِينَ﴾ — حان الآن موعد أذان {prayer_ar} حسب توقيت مدينتكم. تقبل الله طاعتكم 🤍"
+                window_ends_at = iso(now + timedelta(seconds=PRAYER_ALERT_WINDOW_SECONDS))
+                alert_doc = {
+                    "prayer_name": prayer_ar,
+                    "message": text,
+                    "issued_at": iso(now),
+                    "window_ends_at": window_ends_at,
+                    "city": city,
+                    "country": country,
+                }
+                await db.matches.update_one(
+                    {"id": match["id"]},
+                    {"$set": {"zikr_alert": alert_doc, "zikr_last_key": announce_key}},
+                )
+                await _insert_system_chat_message(match["id"], text, username="ذِكْر 🤍")
+                return alert_doc
+    return None
+
+
 @api.post("/matches/{match_id}/chat")
 async def post_chat(match_id: str, body: ChatMessageIn, user: dict = Depends(get_current_user)):
     m = await db.matches.find_one({"id": match_id}, {"_id": 0})
@@ -3166,6 +4836,7 @@ async def post_chat(match_id: str, body: ChatMessageIn, user: dict = Depends(get
         raise HTTPException(403, "لا يمكنك الكتابة في هذا الشات")
     msg = _build_chat_message(body, user, match_id, _determine_chat_role(user, a, b))
     await db.chat_messages.insert_one(msg)
+    await _maybe_handle_sanad_mention(m, user, body.text or "")
     msg.pop("_id", None)
     # Fire-and-forget AI toxicity scan for text messages
     if msg.get("type") == "text" and (msg.get("text") or "").strip():
@@ -3173,6 +4844,33 @@ async def post_chat(match_id: str, body: ChatMessageIn, user: dict = Depends(get
             match_id, msg["id"], user["id"], user["username"], msg["text"]
         ))
     return msg
+
+
+class SanadAskIn(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+
+@api.post("/matches/{match_id}/sanad/ask")
+async def ask_sanad(match_id: str, body: SanadAskIn, user: dict = Depends(get_current_user)):
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(404, "غير موجود")
+
+    can_view_text, _, _, _, _ = await _chat_perms(match, user)
+    if not can_view_text and not is_staff(user):
+        raise HTTPException(403, "سند متاح فقط لأطراف المباراة")
+
+    question = (body.question or "").strip()
+    if not question:
+        raise HTTPException(400, "السؤال فارغ")
+
+    reply = await _send_sanad_reply(match_id, user, question)
+    return {
+        "ok": True,
+        "question": question,
+        "answer": reply.get("text") or "",
+        "reply": reply,
+    }
 
 
 @api.post("/chat/{msg_id}/opponent-decision")
@@ -3512,6 +5210,53 @@ async def admin_list_users(user: dict = Depends(get_current_user)):
     return [sanitize_user(d) for d in docs]
 
 
+@api.get("/admin/sanad-analytics")
+async def admin_sanad_analytics(user: dict = Depends(get_current_user)):
+    if not is_staff(user):
+        raise HTTPException(403, "للمنظمين فقط")
+
+    total_questions = await db.sanad_questions.count_documents({})
+    today_start = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_iso = iso(today_start)
+    questions_today = await db.sanad_questions.count_documents({"created_at": {"$gte": today_iso}})
+
+    top_matches_raw = await db.sanad_questions.aggregate([
+        {"$group": {"_id": "$match_id", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 5},
+    ]).to_list(5)
+
+    top_users_raw = await db.sanad_questions.aggregate([
+        {
+            "$group": {
+                "_id": {"$ifNull": ["$user_id", "$asked_by_user_id"]},
+                "count": {"$sum": 1},
+                "username": {"$last": {"$ifNull": ["$username", "$asked_by_username"]}},
+            }
+        },
+        {"$sort": {"count": -1}},
+        {"$limit": 5},
+    ]).to_list(5)
+
+    latest = await db.sanad_questions.find({}, {"_id": 0}).sort("created_at", -1).to_list(20)
+
+    return {
+        "total_questions": int(total_questions),
+        "questions_today": int(questions_today),
+        "top_matches": [
+            {"match_id": t.get("_id"), "count": int(t.get("count", 0))}
+            for t in top_matches_raw
+            if t.get("_id")
+        ],
+        "top_users": [
+            {"user_id": t.get("_id"), "username": t.get("username") or "-", "count": int(t.get("count", 0))}
+            for t in top_users_raw
+            if t.get("_id")
+        ],
+        "latest_questions": latest,
+    }
+
+
 @api.post("/admin/users/{user_id}/role")
 async def change_user_role(user_id: str, body: RoleChangeIn, request: Request, user: dict = Depends(get_current_user)):
     if not is_owner(user):
@@ -3628,6 +5373,7 @@ async def _create_round_matches(tournament: dict, round_index: int) -> None:
             "finished_at": None,
         }
         await db.matches.insert_one(m)
+        await _post_sanad_welcome(m["id"])
         slot["match_id"] = m["id"]
     await db.tournaments.update_one(
         {"id": tournament["id"]},
@@ -4089,6 +5835,16 @@ async def update_my_profile(body: ProfileUpdateIn, user: dict = Depends(get_curr
     """Update Activision ID and streaming URLs for the logged-in user.
     Activision ID can only be changed once per 14 days."""
     update = {}
+    if body.gaming_platform is not None:
+        update["gaming_platform"] = (body.gaming_platform or "pc").strip().lower()
+    if body.discord_username is not None:
+        raw_du = (body.discord_username or "").strip()
+        normalized_du = raw_du[1:] if raw_du.startswith("@") else raw_du
+        if normalized_du and len(normalized_du) < 2:
+            raise HTTPException(400, "Discord Username قصير جدا")
+        if len(normalized_du) > 50:
+            raise HTTPException(400, "Discord Username طويل جدا")
+        update["discord_username"] = normalized_du
     if body.act is not None:
         v = body.act.strip()
         if v and len(v) < 2:
@@ -4112,7 +5868,7 @@ async def update_my_profile(body: ProfileUpdateIn, user: dict = Depends(get_curr
                     pass
             update["act"] = v
             update["act_changed_at"] = iso(now_utc())
-    for field in ("twitch_url", "kick_url", "youtube_url", "tiktok_url"):
+    for field in ("twitch_url", "kick_url", "youtube_url", "tiktok_url", "instagram_link", "x_link"):
         val = getattr(body, field)
         if val is None:
             continue
@@ -4121,7 +5877,11 @@ async def update_my_profile(body: ProfileUpdateIn, user: dict = Depends(get_curr
             raise HTTPException(400, f"رابط {field} غير صالح")
         update[field] = val
     # Personal Plus gated visual customization
-    visual_fields = {"avatar": body.avatar, "banner": body.banner, "accent_color": body.accent_color}
+    visual_fields = {
+        "avatar": body.avatar,
+        "banner": body.banner,
+        "accent_color": body.accent_color,
+    }
     wants_visual = any(v is not None for v in visual_fields.values())
     if wants_visual and not user_is_personal_plus(user):
         raise HTTPException(403, "تخصيص الصورة والبانر واللون متاح لمشتركي Personal Plus فقط")
@@ -4523,28 +6283,47 @@ async def list_online_clans(q: str = ""):
 # ---------------- MATCH-LEVEL PRAYER BREAK (15-min chat-side pause) ----------------
 @api.post("/matches/{match_id}/match-prayer-break")
 async def start_match_prayer_break(match_id: str, user: dict = Depends(get_current_user)):
-    """A clan leader/vice starts a 15-min full-match prayer break.
-    All gameplay actions (votes, grace claims) are paused for the duration."""
+    """Prayer break gate: opens only after Zikr prayer alert, one use per match.
+    Requires both team captains (A+B) approvals to activate."""
     match = await db.matches.find_one({"id": match_id}, {"_id": 0})
     if not match:
         raise HTTPException(404, "غير موجود")
     if match["status"] != "live":
         raise HTTPException(400, "المباراة منتهية")
+
+    await _maybe_emit_zikr_alert_for_match(match)
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+
+    alert = (match or {}).get("zikr_alert") or {}
+    alert_window_ok = False
+    if alert.get("window_ends_at"):
+        try:
+            alert_window_ok = datetime.fromisoformat(alert["window_ends_at"]) > now_utc()
+        except Exception:
+            alert_window_ok = False
+    if not alert_window_ok and not is_staff(user):
+        raise HTTPException(400, "زر بريك الصلاة متاح فقط بعد تنبيه ذِكْر ولمدة 15 دقيقة")
+
     a = await _get_clan(match["clan_a_id"])
     b = await _get_clan(match["clan_b_id"])
     side = _user_side(user, a, b)
     if not side and not is_staff(user):
         raise HTTPException(403, "للقادة والنواب فقط")
-    existing = match.get("match_prayer_break")
-    if existing and existing.get("ends_at"):
+
+    existing = (match.get("match_prayer_break") or {}).copy()
+    if existing.get("used_once"):
+        raise HTTPException(400, "تم استخدام بريك الصلاة سابقاً في هذه المباراة")
+
+    existing_status = (existing.get("status") or "").lower()
+    if existing_status == "active" and existing.get("ends_at"):
         try:
-            ends = datetime.fromisoformat(existing["ends_at"])
-            if now_utc() < ends:
+            if datetime.fromisoformat(existing["ends_at"]) > now_utc() and not existing.get("resumed"):
                 raise HTTPException(400, "بريك صلاة جارٍ بالفعل")
         except HTTPException:
             raise
         except Exception:
             pass
+
     # Per-user 30-min anti-spam cooldown on prayer-break trigger
     cd_iso = user.get("prayer_break_cooldown_until")
     if cd_iso and not is_staff(user):
@@ -4557,69 +6336,107 @@ async def start_match_prayer_break(match_id: str, user: dict = Depends(get_curre
             raise
         except Exception:
             pass
+
     now = now_utc()
-    pb = {
-        "started_at": iso(now),
-        "ends_at": iso(now + timedelta(seconds=MATCH_PRAYER_BREAK_SECONDS)),
-        "started_by_clan": side or "ADMIN",
-        "started_by_user_id": user["id"],
-        "started_by_username": user["username"],
+
+    if is_staff(user):
+        pb = {
+            "status": "active",
+            "started_at": iso(now),
+            "ends_at": iso(now + timedelta(seconds=MATCH_PRAYER_BREAK_SECONDS)),
+            "started_by_clan": side or "ADMIN",
+            "started_by_user_id": user["id"],
+            "started_by_username": user["username"],
+            "approved_by_sides": ["A", "B"],
+            "ready_by_sides": [],
+            "used_once": True,
+            "resumed": False,
+        }
+        await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+        await _insert_system_chat_message(match_id, "🕌 بدأ بريك الصلاة (15 دقيقة) — توقف اللعب", username="النظام")
+        return pb
+
+    pb = existing if existing else {
+        "status": "pending",
+        "requested_at": iso(now),
+        "requested_by_side": side,
+        "requested_by_user_id": user["id"],
+        "requested_by_username": user["username"],
+        "approved_by_sides": [],
+        "ready_by_sides": [],
+        "used_once": False,
         "resumed": False,
     }
+    approved = _unique_ids(pb.get("approved_by_sides", []))
+    if side not in approved:
+        approved.append(side)
+    pb["approved_by_sides"] = approved
+
+    if len(approved) >= 2:
+        pb["status"] = "active"
+        pb["started_at"] = iso(now)
+        pb["ends_at"] = iso(now + timedelta(seconds=MATCH_PRAYER_BREAK_SECONDS))
+        pb["started_by_clan"] = pb.get("requested_by_side") or side
+        pb["used_once"] = True
+        pb["resumed"] = False
+        pb["ready_by_sides"] = []
+        await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+        await _insert_system_chat_message(match_id, "🕌 تم اعتماد بريك الصلاة من الطرفين — توقف اللعب لمدة 15 دقيقة", username="النظام")
+    else:
+        pb["status"] = "pending"
+        await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+
     await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
     # Set per-user cooldown so the same user can't spam another prayer break for 30 min
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {"prayer_break_cooldown_until": iso(now + timedelta(minutes=PRAYER_BREAK_USER_COOLDOWN_MIN))}},
     )
-    # System chat message
-    await db.chat_messages.insert_one({
-        "id": str(uuid.uuid4()),
-        "match_id": match_id,
-        "user_id": "system",
-        "username": "النظام",
-        "user_role": "admin",
-        "user_clan_id": None,
-        "type": "text",
-        "text": f"🕌 بدأ بريك الصلاة (15 دقيقة) — توقف اللعب — بدأها كلان {side or 'إدارة'}",
-        "image": None, "video": None,
-        "opponent_decision": None, "admin_decision": None, "admin_note": "",
-        "created_at": iso(now_utc()),
-    })
     return pb
 
 
 @api.post("/matches/{match_id}/match-prayer-resume")
 async def resume_match_prayer_break(match_id: str, user: dict = Depends(get_current_user)):
-    """The team that requested the prayer break (or staff) ends it early."""
+    """Ready-check resume: both teams must mark ready (or staff override) before resuming."""
     match = await db.matches.find_one({"id": match_id}, {"_id": 0})
     if not match:
         raise HTTPException(404, "غير موجود")
-    pb = match.get("match_prayer_break")
+    pb = (match.get("match_prayer_break") or {}).copy()
     if not pb:
         raise HTTPException(400, "لا يوجد بريك صلاة جارٍ")
+    if (pb.get("status") or "") != "active":
+        raise HTTPException(400, "بريك الصلاة غير مفعل بعد")
     a = await _get_clan(match["clan_a_id"])
     b = await _get_clan(match["clan_b_id"])
     side = _user_side(user, a, b)
-    if not is_staff(user) and pb.get("started_by_clan") != side:
-        raise HTTPException(403, "فقط الفريق الذي بدأ البريك يمكنه إنهاؤه")
-    pb["resumed"] = True
-    pb["resumed_at"] = iso(now_utc())
-    pb["ends_at"] = iso(now_utc())
-    await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
-    await db.chat_messages.insert_one({
-        "id": str(uuid.uuid4()),
-        "match_id": match_id,
-        "user_id": "system",
-        "username": "النظام",
-        "user_role": "admin",
-        "user_clan_id": None,
-        "type": "text",
-        "text": "▶️ تم إنهاء بريك الصلاة — استئناف المباراة",
-        "image": None, "video": None,
-        "opponent_decision": None, "admin_decision": None, "admin_note": "",
-        "created_at": iso(now_utc()),
-    })
+
+    if is_staff(user):
+        pb["resumed"] = True
+        pb["resumed_at"] = iso(now_utc())
+        pb["ends_at"] = iso(now_utc())
+        pb["status"] = "resumed"
+        await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+        await _insert_system_chat_message(match_id, "▶️ تم إنهاء بريك الصلاة بواسطة الإدارة — استئناف المباراة", username="النظام")
+        return pb
+
+    if side not in {"A", "B"}:
+        raise HTTPException(403, "فقط قادة طرفي المباراة")
+
+    ready = _unique_ids(pb.get("ready_by_sides", []))
+    if side not in ready:
+        ready.append(side)
+    pb["ready_by_sides"] = ready
+
+    if len(ready) >= 2:
+        pb["resumed"] = True
+        pb["resumed_at"] = iso(now_utc())
+        pb["ends_at"] = iso(now_utc())
+        pb["status"] = "resumed"
+        await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+        await _insert_system_chat_message(match_id, "✅ الفريقان أكدا الجاهزية — استئناف المباراة", username="النظام")
+    else:
+        await db.matches.update_one({"id": match_id}, {"$set": {"match_prayer_break": pb}})
+
     return pb
 
 
@@ -4742,26 +6559,39 @@ async def admin_suspend_clan(clan_id: str, body: ClanSuspendIn, request: Request
 
 @api.post("/auth/forgot-password")
 async def forgot_password(body: ForgotPasswordIn):
-    """MOCKED: Generates a reset link and stores it as a pending reset request.
-    Owner/Admins can view all pending requests in the dashboard.
-    NOTE: email delivery is NOT yet wired (waiting for SMTP/Resend API key)."""
+    """Sends password reset OTP to user's email (if account exists)."""
     email = body.email.lower()
     user = await db.users.find_one({"email": email})
     # Always return 200 so as not to leak account existence
     if user:
-        token = uuid.uuid4().hex
-        await db.password_resets.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": user["id"],
-            "email": email,
-            "username": user["username"],
-            "token": token,
-            "status": "pending",
-            "created_at": iso(now_utc()),
-            "expires_at": iso(now_utc() + timedelta(hours=24)),
-        })
-        logger.info(f"[FORGOT-PASSWORD MOCK] user={email} token={token}")
-    return {"ok": True, "message": "إن وُجد الحساب، سيتلقى الإدارة الطلب لإرسال الرابط"}
+        await _create_email_otp(
+            purpose="reset_password",
+            email=email,
+            payload={"user_id": user["id"]},
+            user_id=user["id"],
+        )
+    return {"ok": True, "message": "إن وُجد الحساب، تم إرسال رمز التحقق إلى البريد الإلكتروني"}
+
+
+@api.post("/auth/reset-password")
+async def reset_password(body: ResetPasswordIn):
+    email = body.email.lower()
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user:
+        # Keep response generic and avoid leaking account existence
+        return {"ok": True, "message": "تم تحديث كلمة المرور بنجاح"}
+
+    await _verify_email_otp("reset_password", email, body.otp, user_id=user["id"])
+
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"password_hash": hash_pw(body.new_password), "updated_at": iso(now_utc())}},
+    )
+    await db.auth_sessions.update_many(
+        {"user_id": user["id"], "revoked_at": None},
+        {"$set": {"revoked_at": iso(now_utc()), "revoked_reason": "password_reset"}},
+    )
+    return {"ok": True, "message": "تم تحديث كلمة المرور بنجاح"}
 
 
 @api.get("/admin/password-resets")
@@ -5105,6 +6935,118 @@ async def _league_rotation_loop() -> None:
         await asyncio.sleep(3600)
 
 
+def _month_window(year: int, month: int) -> tuple[datetime, datetime]:
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    if month == 12:
+        end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+    return start, end
+
+
+async def _award_most_active_player_for_month(year: int, month: int) -> Optional[str]:
+    start, end = _month_window(year, month)
+    pipeline = [
+        {"$match": {"attendance_events": {"$exists": True, "$ne": []}}},
+        {"$unwind": "$attendance_events"},
+        {"$match": {
+            "attendance_events.action": "checkin",
+            "attendance_events.at": {"$gte": iso(start), "$lt": iso(end)},
+        }},
+        {"$group": {"_id": "$attendance_events.user_id", "checkins": {"$sum": 1}}},
+        {"$sort": {"checkins": -1, "_id": 1}},
+        {"$limit": 1},
+    ]
+    top = await db.clan_attendance.aggregate(pipeline).to_list(1)
+    if not top:
+        return None
+    winner_id = top[0].get("_id")
+    if not winner_id:
+        return None
+    winner = await db.users.find_one({"id": winner_id}, {"_id": 0, "id": 1, "username": 1})
+    if not winner:
+        return None
+
+    await _extend_person_plus_for_user(winner_id, months=1)
+    await _create_news_post(
+        kind="hall_of_fame_attendance",
+        title="أكثر لاعب تحضيراً",
+        body=f"👑 **تكريم منارة الانضباط!** نهنئ اللاعب **{winner['username']}** لحصوله على لقب 'أكثر لاعب تحضيراً' هذا الشهر! تم مكافأته باشتراك Person Plus مجاني. حافظوا على حضوركم!",
+        payload={"user_id": winner_id, "year": year, "month": month, "metric": "attendance_checkins"},
+    )
+    return winner_id
+
+
+async def _award_player_of_month_for_month(year: int, month: int) -> Optional[str]:
+    start, end = _month_window(year, month)
+    pipeline = [
+        {"$match": {"mvp_votes": {"$exists": True, "$ne": []}}},
+        {"$unwind": "$mvp_votes"},
+        {"$match": {"mvp_votes.created_at": {"$gte": iso(start), "$lt": iso(end)}}},
+        {"$group": {"_id": "$mvp_votes.candidate_id", "votes": {"$sum": 1}}},
+        {"$sort": {"votes": -1, "_id": 1}},
+        {"$limit": 1},
+    ]
+    top = await db.matches.aggregate(pipeline).to_list(1)
+    if not top:
+        return None
+    winner_id = top[0].get("_id")
+    if not winner_id:
+        return None
+    winner = await db.users.find_one({"id": winner_id}, {"_id": 0, "id": 1, "username": 1})
+    if not winner:
+        return None
+
+    await _extend_person_plus_for_user(winner_id, months=1)
+    await _create_news_post(
+        kind="hall_of_fame_pom",
+        title="نجم الدوري للشهر",
+        body=f"⚽ **نجم الشهر الساطع!** تصفيق حار للبطل **{winner['username']}** الذي حصد أعلى نسبة تصويت كـ 'نجم المباراة' وتوّج بلقب 'نجم الدوري لهذا الشهر'! استمتع بميزات الـ Person Plus الخاصة بك مجاناً!",
+        payload={"user_id": winner_id, "year": year, "month": month, "metric": "pom_votes"},
+    )
+    return winner_id
+
+
+async def _run_monthly_hall_of_fame_if_due(now: Optional[datetime] = None) -> bool:
+    now = now or now_utc()
+    # Run exactly in the last-day 23:59 window; loop ticks every minute.
+    tomorrow = now + timedelta(days=1)
+    is_last_day = tomorrow.month != now.month
+    if not (is_last_day and now.hour == 23 and now.minute == 59):
+        return False
+
+    period = f"{now.year:04d}-{now.month:02d}"
+    lock = await db.system_jobs.find_one_and_update(
+        {"job": "monthly_hall_of_fame", "period": period},
+        {"$setOnInsert": {"id": str(uuid.uuid4()), "job": "monthly_hall_of_fame", "period": period, "created_at": iso(now)}},
+        upsert=True,
+        return_document=ReturnDocument.BEFORE,
+    )
+    if lock:
+        return False
+
+    attendance_winner = await _award_most_active_player_for_month(now.year, now.month)
+    pom_winner = await _award_player_of_month_for_month(now.year, now.month)
+    await db.system_jobs.update_one(
+        {"job": "monthly_hall_of_fame", "period": period},
+        {"$set": {
+            "ran_at": iso(now_utc()),
+            "attendance_winner_id": attendance_winner,
+            "pom_winner_id": pom_winner,
+        }},
+    )
+    return True
+
+
+async def _monthly_hall_of_fame_loop() -> None:
+    while True:
+        try:
+            await _run_monthly_hall_of_fame_if_due()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Monthly hall of fame loop error: %s", exc)
+        await asyncio.sleep(60)
+
+
 # ---------------- CUSTOM LEAGUES (multi-league system) ----------------
 def _validate_rules_image(img: str, label: str = "صورة القوانين") -> str:
     img = (img or "").strip()
@@ -5134,6 +7076,8 @@ def _normalized_league_rules(league: dict) -> List[dict]:
     parsed = _parse_legacy_league_rules((league.get("rules") or "").strip())
     if not parsed:
         return []
+    league_id = (league.get("id") or "league").strip() or "league"
+    base_ts = (league.get("started_at") or league.get("created_at") or "").strip() or iso(now_utc())
     unique_images = []
     if league.get("rules_image"):
         img = _validate_rules_image(league.get("rules_image"), "صورة القوانين")
@@ -5142,13 +7086,13 @@ def _normalized_league_rules(league: dict) -> List[dict]:
     out = []
     for i, text in enumerate(parsed, start=1):
         out.append({
-            "id": str(uuid.uuid4()),
+            "id": f"legacy-{league_id}-{i}",
             "title": f"قاعدة {i}",
             "body": text,
             "order": i,
             "images": unique_images if i == 1 else [],
-            "created_at": iso(now_utc()),
-            "updated_at": iso(now_utc()),
+            "created_at": base_ts,
+            "updated_at": base_ts,
         })
     return out
 
@@ -5156,6 +7100,7 @@ def _normalized_league_rules(league: dict) -> List[dict]:
 def _effective_league_rules(league: dict) -> List[dict]:
     stored = league.get("rules_items")
     if isinstance(stored, list) and stored:
+        league_id = (league.get("id") or "league").strip() or "league"
         cleaned = []
         for idx, raw in enumerate(stored, start=1):
             if not isinstance(raw, dict):
@@ -5164,7 +7109,7 @@ def _effective_league_rules(league: dict) -> List[dict]:
             body = (norm.get("body") or "").strip()
             if not body:
                 continue
-            norm["id"] = norm.get("id") or str(uuid.uuid4())
+            norm["id"] = (norm.get("id") or "").strip() or f"legacy-{league_id}-{idx}"
             norm["title"] = (norm.get("title") or "").strip() or f"قاعدة {idx}"
             norm["order"] = int(norm.get("order") or idx)
             norm["created_at"] = norm.get("created_at") or iso(now_utc())
@@ -5173,6 +7118,71 @@ def _effective_league_rules(league: dict) -> List[dict]:
         cleaned.sort(key=lambda r: int(r.get("order") or 0))
         return cleaned
     return _normalized_league_rules(league)
+
+
+async def _parse_rule_payload_from_request(request: Request) -> RuleIn:
+    ctype = (request.headers.get("content-type") or "").lower()
+
+    if "multipart/form-data" not in ctype:
+        try:
+            raw = await request.json()
+        except Exception:
+            raise HTTPException(400, "صيغة الطلب غير صحيحة")
+        return RuleIn.model_validate(raw or {})
+
+    form = await request.form()
+
+    def _form_text(name: str, default: str = "") -> str:
+        val = form.get(name, default)
+        if val is None:
+            return default
+        return str(val)
+
+    raw_images = []
+
+    # Accept repeated text fields: images=...&images=...
+    for v in form.getlist("images"):
+        if isinstance(v, str) and v.strip():
+            raw_images.append(v.strip())
+
+    # Accept JSON array string in images_json
+    images_json = _form_text("images_json", "").strip()
+    if images_json:
+        try:
+            parsed = json.loads(images_json)
+            if isinstance(parsed, list):
+                raw_images.extend([str(x).strip() for x in parsed if str(x).strip()])
+        except Exception:
+            raise HTTPException(400, "صيغة images_json غير صحيحة")
+
+    def _file_to_data_url(upload: UploadFile) -> Optional[str]:
+        mime = (upload.content_type or "").strip().lower()
+        if not mime.startswith("image/"):
+            raise HTTPException(400, "يُسمح فقط برفع ملفات صور")
+        return mime
+
+    # Accept files from image_file / images_files / images
+    files = []
+    for key in ("image_file", "images_files", "images"):
+        for f in form.getlist(key):
+            if getattr(f, "filename", None) and hasattr(f, "read"):
+                files.append(f)
+
+    for f in files:
+        mime = _file_to_data_url(f)
+        content = await f.read()
+        if len(content) > 3_000_000:
+            raise HTTPException(400, f"الصورة {f.filename or ''} كبيرة جداً (الحد 3MB)")
+        raw_images.append(f"data:{mime};base64,{base64.b64encode(content).decode()}")
+
+    payload = {
+        "title": _form_text("title", ""),
+        "body": _form_text("body", ""),
+        "order": int(_form_text("order", "0") or 0),
+        "image": _form_text("image", ""),
+        "images": raw_images,
+    }
+    return RuleIn.model_validate(payload)
 
 
 @api.post("/leagues/custom")
@@ -5308,13 +7318,14 @@ async def list_league_rules(league_id: str):
 
 
 @api.post("/leagues/{league_id}/rules")
-async def create_league_rule(league_id: str, body: RuleIn, user: dict = Depends(get_current_user)):
+async def create_league_rule(league_id: str, request: Request, user: dict = Depends(get_current_user)):
     if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
     league = await db.leagues.find_one({"id": league_id}, {"_id": 0})
     if not league:
         raise HTTPException(404, "الدوري غير موجود")
 
+    body = await _parse_rule_payload_from_request(request)
     rules = _effective_league_rules(league)
     payload = _normalize_rule_doc(body.model_dump())
     new_rule = {
@@ -5331,7 +7342,7 @@ async def create_league_rule(league_id: str, body: RuleIn, user: dict = Depends(
 
 
 @api.put("/leagues/{league_id}/rules/{rule_id}")
-async def update_league_rule(league_id: str, rule_id: str, body: RuleIn, user: dict = Depends(get_current_user)):
+async def update_league_rule(league_id: str, rule_id: str, request: Request, user: dict = Depends(get_current_user)):
     if not is_staff(user):
         raise HTTPException(403, "للمنظمين فقط")
     league = await db.leagues.find_one({"id": league_id}, {"_id": 0})
@@ -5343,6 +7354,7 @@ async def update_league_rule(league_id: str, rule_id: str, body: RuleIn, user: d
     if not target:
         raise HTTPException(404, "القاعدة غير موجودة")
 
+    body = await _parse_rule_payload_from_request(request)
     payload = _normalize_rule_doc(body.model_dump())
     target.update({
         **payload,
@@ -5966,6 +7978,8 @@ app.include_router(api)
 # Serve uploaded videos via /api/uploads/videos/*
 app.mount("/api/uploads/videos", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 app.mount("/api/uploads/clan_logos", StaticFiles(directory=str(CLAN_LOGO_UPLOAD_DIR)), name="clan-logos-uploads")
+app.mount("/api/uploads/guard", StaticFiles(directory=str(GUARD_UPLOAD_DIR)), name="guard-uploads")
+app.mount("/api/downloads", StaticFiles(directory=str(DOWNLOADS_DIR)), name="downloads")
 
 _cors_env = os.environ.get("CORS_ORIGINS", "").strip()
 if _cors_env:

@@ -6,6 +6,13 @@ import time
 import pytest
 import requests
 
+from _auth_test_utils import (
+    count_pending_reset_otps,
+    create_user_and_token,
+    ensure_admin_token,
+    test_headers as _headers,
+)
+
 BASE_URL = (
     os.environ.get("TEST_BASE_URL")
     or os.environ.get("BACKEND_URL")
@@ -19,22 +26,21 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin@12345")
 
 def _register(suffix):
     s = requests.Session()
-    r = s.post(f"{API}/auth/register", json={
-        "email": f"lb_{suffix}_{uuid.uuid4().hex[:6]}@example.com",
-        "username": f"lb_{suffix}_{uuid.uuid4().hex[:5]}",
-        "password": "Pass@1234",
-        "act": f"COD_{suffix}_{uuid.uuid4().hex[:4]}",
-        "accepted_terms": True,
-    })
-    assert r.status_code == 200, r.text
-    return s, r.json()["user"], r.json()["token"]
+    user, token = create_user_and_token(
+        role="player",
+        email=f"lb_{suffix}_{uuid.uuid4().hex[:6]}@example.com",
+        username=f"lb_{suffix}_{uuid.uuid4().hex[:5]}",
+        act=f"COD_{suffix}_{uuid.uuid4().hex[:4]}",
+    )
+    me = s.get(f"{API}/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200, me.text
+    return s, me.json(), token
 
 
 def _login_admin():
     s = requests.Session()
-    r = s.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
-    assert r.status_code == 200
-    return s, r.json()["user"], r.json()["token"]
+    user, token = ensure_admin_token(ADMIN_EMAIL)
+    return s, user, token
 
 
 def _make_clan(token, prefix):
@@ -109,19 +115,9 @@ def test_me_profile_updates_act_and_streams():
 # ---------------- Forgot password completion flow ----------------
 def test_forgot_password_admin_complete(admin):
     _, u, _ = _register("fpc")
-    requests.post(f"{API}/auth/forgot-password", json={"email": u["email"]})
-    h = {"Authorization": f"Bearer {admin['token']}"}
-    resets = requests.get(f"{API}/admin/password-resets", headers=h).json()
-    target = next((x for x in resets if x["user_id"] == u["id"]), None)
-    assert target, "Pending reset not found for user"
-    rid = target["id"]
-    r = requests.post(f"{API}/admin/password-resets/{rid}/complete", headers=h)
+    r = requests.post(f"{API}/auth/forgot-password", headers=_headers(), json={"email": u["email"]})
     assert r.status_code == 200
-    resets2 = requests.get(f"{API}/admin/password-resets", headers=h).json()
-    after = next((x for x in resets2 if x["id"] == rid), None)
-    # After complete, either removed from pending list, or status flipped
-    if after is not None:
-        assert after.get("status") in ("completed", "done")
+    assert count_pending_reset_otps(u["id"]) >= 1
 
 
 # ---------------- Admin edit user (username/email/password/act) ----------------
@@ -143,8 +139,13 @@ def test_admin_edit_user_full(admin):
     assert body["act"] == "ACT_UPDATED"
     # New password works
     s2 = requests.Session()
-    login = s2.post(f"{API}/auth/login", json={"email": new_email, "password": "NewPass@9876"})
+    login = s2.post(
+        f"{API}/auth/login",
+        headers=_headers(),
+        json={"email": new_email, "password": "NewPass@9876"},
+    )
     assert login.status_code == 200
+    assert login.json().get("otp_required") is True
 
 
 # ---------------- Admin edit clan ----------------

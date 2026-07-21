@@ -1,8 +1,0 @@
-WARNING:rivals:JWT_SECRET is not set in environment. Using ephemeral runtime secret (tokens reset after restart).
-WARNING:rivals:CORS_ORIGINS not set. Using localhost origins for development only.
-INFO:     Started server process [6608]
-INFO:     Waiting for application startup.
-WARNING:rivals:ADMIN_EMAIL/ADMIN_PASSWORD are not fully configured. Skipping admin seed.
-WARNING:rivals:OWNER_EMAIL/OWNER_PASSWORD are not fully configured. Skipping owner seed.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)

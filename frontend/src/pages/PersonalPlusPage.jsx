@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Sparkles, Check, Crown, Image as ImageIcon, Palette, Star, ShieldCheck, Trophy, Users, Swords } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import api, { formatApiErrorDetail } from "../api";
 
 const TIERS = [
   {
@@ -48,8 +49,9 @@ const TIERS = [
 ];
 
 export default function PersonalPlusPage() {
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const [busyTier, setBusyTier] = useState(null);
+  const [busyRivTier, setBusyRivTier] = useState(null);
   const navigate = useNavigate();
 
   const mockCheckout = (tierId) => {
@@ -58,6 +60,24 @@ export default function PersonalPlusPage() {
       setBusyTier(null);
       toast.success("🚧 الدفع قيد التطوير — سيتم تفعيل الاشتراك عند ربط بوابة الدفع");
     }, 1100);
+  };
+
+  const checkoutWithRiv = async (tierId) => {
+    setBusyRivTier(tierId);
+    try {
+      const plan = tierId === "personal" ? "person_plus" : "clan_plus";
+      const { data } = await api.post("/billing/checkout", {
+        plan,
+        provider: "riv_points",
+        pay_with_riv_points: true,
+      });
+      await refresh();
+      toast.success(`تم الدفع بنقاط RIV بنجاح • الرصيد المتبقي: ${data?.riv_points ?? "--"} RIV`);
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail));
+    } finally {
+      setBusyRivTier(null);
+    }
   };
 
   const trialActive = !!user?.is_personal_plus;
@@ -78,6 +98,7 @@ export default function PersonalPlusPage() {
             <Crown size={14} /> Personal Plus التجريبية مفعّلة حتى {new Date(user.personal_plus_until).toLocaleDateString("ar")}
           </div>
         )}
+        <div className="mt-4 text-emerald-300 font-semibold">🪙 رصيدك الحالي: {Number(user?.riv_points || 0)} RIV</div>
       </header>
 
       <section className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto">
@@ -124,6 +145,16 @@ export default function PersonalPlusPage() {
                 style={{ background: t.accent }}
               >
                 {busyTier === t.id ? "..." : t.cta}
+              </button>
+              <button
+                data-testid={`cta-riv-${t.id}`}
+                disabled={busyRivTier === t.id}
+                onClick={() => checkoutWithRiv(t.id)}
+                className="mt-2 w-full py-3 rounded-md font-bold text-sm border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-60"
+              >
+                {busyRivTier === t.id
+                  ? "..."
+                  : `Pay with RIV Points (${t.id === "personal" ? 11 : 27} RIV)`}
               </button>
               <p className="text-[10px] text-white/40 text-center mt-2">دفع آمن • إلغاء في أي وقت</p>
             </div>
